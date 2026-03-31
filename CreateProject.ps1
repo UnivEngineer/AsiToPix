@@ -16,7 +16,7 @@ if ($inputPath -match 'ASIAir\\(?<obj>[^\\]+)\\(?<season>[^\\]+)\\(?<tel>.*?) @ 
     $parsedSeason   = $Matches['season']
     $parsedTel      = $Matches['tel']
     $parsedCamShort = $Matches['cam']
-} else { Write-Host "Path parse error! Expected: ...\ASIAir\<Object>\<Season>\<Tel> @ <Cam>\..." -ForegroundColor Red; exit }
+} else { Write-Host "Path parse error! Expected: ...\ASIAir\<Object>\<Season>\<Scope> @ <Cam>\..." -ForegroundColor Red; exit }
 
 # ── Interactive parameter confirmation ───────────────────────────────────────
 function Confirm-Param {
@@ -34,7 +34,7 @@ function Confirm-Param {
 Write-Host "`n-- Detected parameters -- (Enter to accept, or type override)" -ForegroundColor Cyan
 # Print each parameter label and detected value; Confirm-Param will prompt on same line
 Write-Host "" -NoNewline
-$obj      = Confirm-Param "Object"  $parsedObj
+$astroObj = Confirm-Param "Object"  $parsedObj
 $season   = Confirm-Param "Season"  $parsedSeason
 $telSetup = Confirm-Param "Scope"   $parsedTel
 Write-Host ""
@@ -43,29 +43,34 @@ Write-Host ""
 $camShort = $parsedCamShort
 
 # Structure
-$safeObj = $obj.Replace(" ", "_");
+$safeObj = $astroObj.Replace(" ", "_");
 $safeSetup = "$($season)_$($telSetup)_$($camShort)".Replace(" ", "_").Replace("@","").Replace("__","_")
 $setupRoot = Join-Path (Join-Path $localBase $safeObj) $safeSetup
 $sourcePath = Join-Path $setupRoot "Source"; $pixPath = Join-Path $setupRoot "Pix"
 
 if (Test-Path $sourcePath) {
-    if ((Read-Host "Clean [Source] folder? (y/n)") -match "^[yYdD]") { Remove-Item $sourcePath -Recurse -Force }
+    $cleanChoice = Read-Host "Clean [Source] folder? (Y/n)"
+    if ($cleanChoice -eq '' -or $cleanChoice -match '^[yYдД]') { Remove-Item $sourcePath -Recurse -Force }
 }
 foreach ($p in @($sourcePath, $pixPath)) { if (!(Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null } }
 
-$lightsRoot = "$baseZ\ASIAir\$obj\$season\$telSetup @ $camShort\Good"
+Write-Host ""
+$mergeChoice = Read-Host "Allow WBPP to merge sessions with filters IRC and None into a single one L? (Y/n)"
+$mergeFilters = ($mergeChoice -eq '' -or $mergeChoice -match '^[yYдД]')
+
+$lightsRoot = "$baseZ\ASIAir\$astroObj\$season\$telSetup @ $camShort\Good"
 $pendingLinks = @()
  # Camera mapping summary: collect observed raw filters, sanitized filters and targets per camera
  $camMap = @{}
 
 # Filter mapping: raw filter name from filename -> normalized output filter + WBPP target group
-# OSC (*MC): IRC/L/Triband -> L/RGB | None -> None/RGB | HO/UHC -> HO/HO | SO -> SO/SO
+# OSC (*MC): IRC/L/Trib -> L/RGB | None -> None/RGB | HO/UHC -> HO/HO | SO -> SO/SO
 # Mono (*MM): L -> L/RGB | None -> None/RGB | R/G/B -> R,G,B/RGB | H/Ha -> H/H | S/SII -> S/S | O/OIII -> O/O
 function Get-FilterMap($rawFilt, $camType) {
     $r = $rawFilt.Trim()
     if ($camType -eq "OSC") {
         switch -Regex ($r) {
-            '^(IRC|Triband)$'      { return @{ Filt="L";    Target="RGB" } }
+            '^(IRC|Trib)$'         { return @{ Filt="L";    Target="RGB" } }
             '^L$'                  { return @{ Filt="L";    Target="RGB" } }
             '^None$'               { return @{ Filt="None"; Target="RGB" } }
             '^(HO|UHC)$'           { return @{ Filt="HO";   Target="HO"  } }
@@ -110,32 +115,37 @@ function Get-CalibPath($type, $gain, $rawTemp, $expValue, $cb) {
     return $null
 }
 
+function AngleDiff180($a, $b) {
+    $diff = [Math]::Abs($a - $b) % 180
+    if ($diff -gt 90) { $diff = 180 - $diff }
+    return $diff
+}
+
 # SCANNER - iterates filter-group folders (L, RGB, Ha...) then date sub-folders
 foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
     foreach ($dFolder in (Get-ChildItem $fFolder.FullName -Directory)) {
-        $date = ($dFolder.Name -split ' ')[0]
-        $sample = Get-ChildItem $dFolder.FullName -Filter "*.fit*" | Select-Object -First 1
-        if (!$sample) { continue }
-
+        $sessionDate = ($dFolder.Name -split ' ')[0]
+        # DEBUG: выводим путь и имя папки-даты
+        # Write-Host "[DEBUG] Processing session folder: $($dFolder.FullName) | date var: $sessionDate" -ForegroundColor DarkGray
+        $fitsFiles = Get-ChildItem $dFolder.FullName -Filter "*.fit*"
+        if (!$fitsFiles) { continue }
+        $sample = $fitsFiles | Select-Object -First 1
         $fName = $sample.Name
 
         # 1. DETECT CAMERA FROM THIS SESSION'S FITS FILENAME
-        # Pattern: ..._2600MM_... or ..._2600MC_... or ..._585MC_... etc.
         $sessionCamFull = $camShort   # fallback to path-level short name
         if ($fName -match '_(?<camf>(?:ASI)?\d{3,4}M[MCPmcp]+)_') {
             $sessionCamFull = ("ASI" + $Matches['camf']) -replace '^ASIASI','ASI'
         }
         $sessionCamType  = if ($sessionCamFull -match "MM") { "Mono" } else { "OSC" }
         $sessionCalibBase = "$baseZ\Calibration\$sessionCamFull"
-        $camInFile = $sessionCamFull -replace '^ASI',''   # e.g. "2600MM", "2600MC", "585MC"
+        $camInFile = $sessionCamFull -replace '^ASI',''
 
-        # Ensure camera entry exists in map
         if (-not $camMap.ContainsKey($sessionCamFull)) {
             $camMap[$sessionCamFull] = @{ Observed = @(); Sanitized = @(); Targets = @(); Mappings = @() }
         }
 
         # 2. EXTRACT RAW FILTER FROM FILENAME
-        # Pattern: ..._<CamModel>_<Filter>_gain...  e.g. _2600MC_None_gain120_
         $rawFilt = "Unknown"
         if ($fName -match "_$( [regex]::Escape($camInFile) )_(?<realFilt>[^_]+)_gain") {
             $rawFilt = $Matches['realFilt']
@@ -143,10 +153,15 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
 
         # 3. MAP TO NORMALIZED FILTER + WBPP TARGET
         $fm        = Get-FilterMap $rawFilt $sessionCamType
-        $filt      = $fm.Filt      # normalized filter used for folder name and flat matching
-        $targetGrp = $fm.Target    # WBPP integration target keyword
+        $filt      = $fm.Filt
+        $targetGrp = $fm.Target
 
-        # Record mapping info for summary
+        # Optional: Merge IRC/None into L for OSC cameras if user agrees
+        if ($mergeFilters -and $sessionCamType -eq "OSC" -and ($rawFilt -eq "None" -or $rawFilt -eq "IRC" -or $rawFilt -eq "Trib")) {
+            $filt = "L"
+        }
+
+
         $camMap[$sessionCamFull].Observed += $rawFilt
         $camMap[$sessionCamFull].Sanitized += $filt
         $camMap[$sessionCamFull].Targets += $targetGrp
@@ -157,22 +172,19 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
         $curExp  = $valExp.Replace(".0","") + "s"
         $curGain = if ($fName -match "_gain(\d+)_") { $Matches[1] } else { "120" }
         $curTemp = if ($fName -match "_(-?\d+\.?\d*)C_") { $Matches[1] } else { "-20" }
-        
-        # Strip 'deg' before converting to INT
         $curAngRaw = if ($fName -match "_(\d+)deg_") { $Matches[1] } else { $null }
         $numCurAng = if ($curAngRaw) { [int]$curAngRaw } else { -999 }
         $angDisp = if ($numCurAng -eq -999) { "Unknown" } else { "${numCurAng}deg" }
 
         # --- Add newline before session header for readability ---
         Write-Host ""
-        Write-Host "  [$sessionCamFull/$sessionCamType] $date | Filter: $rawFilt -> $filt | Target: $targetGrp | Angle: $angDisp" -ForegroundColor Green
+        Write-Host "  [$sessionCamFull/$sessionCamType] $sessionDate | Filter: $rawFilt -> $filt | Target: $targetGrp | Angle: $angDisp" -ForegroundColor Green
 
         $roundT = "$([Math]::Round([double]$curTemp / 5.0) * 5)C"
-        $sTag = "Session_${date}_Filter_${filt}_Target_${targetGrp}_Gain_${curGain}_Exp_${curExp}_Cam_${sessionCamFull}"
+        $sTag = "Session_${sessionDate}_Filter_${filt}_Target_${targetGrp}_Gain_${curGain}_Exp_${curExp}_Cam_${sessionCamFull}"
         $cTag = "Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Cam_${sessionCamFull}"
 
-        # Always add CAM to tag for all types
-        $pendingLinks += [PSCustomObject]@{ Type="Lights"; Tag=$sTag; Src=$dFolder.FullName; Display="Good\$($fFolder.Name)\$date"; Cam=$sessionCamFull }
+        $pendingLinks += [PSCustomObject]@{ Type="Lights"; Tag=$sTag; Src=$dFolder.FullName; Display="Good\$($fFolder.Name)\$sessionDate"; Cam=$sessionCamFull }
 
         # --- FLATS SEARCH ---
         # Build list of all raw filter names that map to the same normalized filter,
@@ -183,7 +195,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
         $flatAliases += $filt
         # Add known synonyms for the normalized filter
         switch ($filt) {
-            "L"    { $flatAliases += "IRC"; $flatAliases += "Triband" }
+            "L"    { $flatAliases += "IRC"; $flatAliases += "Trib" }
             "H"    { $flatAliases += "Ha" }
             "S"    { $flatAliases += "SII" }
             "O"    { $flatAliases += "OIII" }
@@ -208,7 +220,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
         }
 
         # Known filters for validation
-        $knownFilters = @('L','None','R','G','B','H','Ha','S','SII','O','OIII','OII','IRC','Triband','HO','UHC','SO')
+        $knownFilters = @('L','None','R','G','B','H','Ha','S','SII','O','OIII','IRC','Trib','HO','UHC','SO')
 
         # Helper: try to parse date as yy.MM.dd or dd.MM.yy
         function ParseDate($dateStr) {
@@ -230,8 +242,8 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                     $folderName = $item.Name
                     $date = $folderName.Substring(0,8)
                     $rest = $folderName.Substring(8).TrimStart()
-                    $filt = $null; $ang = $null; $warn = $false
-                    if ($rest -match '^(filt)?([^ _]+)') { $filt = $Matches[2] }
+                    $flatFilt = $null; $ang = $null; $warn = $false
+                    if ($rest -match '^(filt)?([^ _]+)') { $flatFilt = $Matches[2] }
                     else { $warn = $true; Write-Host "[!] Flat folder '$folderName' does not match expected pattern (date filt<Filter> or date <Filter>)" -ForegroundColor Red }
                     # Validate date
                     $dateOk = $false
@@ -239,11 +251,11 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                     if ($d) { $dateOk = $true } else { $dateOk = $false }
                     if (-not $dateOk) { $warn = $true; Write-Host "[!] Invalid date in flat folder: $folderName" -ForegroundColor Red }
                     # Validate filter
-                    if ($filt -and ($knownFilters -notcontains $filt)) { $warn = $true; Write-Host "[!] Unknown filter '$filt' in flat folder: $folderName" -ForegroundColor Red }
+                    if ($flatFilt -and ($knownFilters -notcontains $flatFilt)) { $warn = $true; Write-Host "[!] Unknown filter '$flatFilt' in flat folder: $folderName" -ForegroundColor Red }
                     # Validate angle if present (optional)
                     if ($folderName -match '(\d+)deg') { $ang = $Matches[1] } else { $ang = $null }
                     if ($ang -and ($ang -notmatch '^\d+$')) { $warn = $true; Write-Host "[!] Invalid angle in flat folder: $folderName" -ForegroundColor Red }
-                    # Write-Host "[DEBUG] Found flat folder: $folderName | Filter: $filt | Date: $date | Angle: $ang" -ForegroundColor Magenta
+                    # Write-Host "[DEBUG] Found flat folder: $folderName | Filter: $flatFilt | Date: $date | Angle: $ang" -ForegroundColor Magenta
                     $obj = [PSCustomObject]@{ Name = $item.Name; FullName = $item.FullName; Origin = $m }
                     $avail += $obj
                 }
@@ -251,11 +263,15 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
         }
 
         if ($avail.Count -eq 0) {
-            $lightsDisplay = "Good\$($fFolder.Name)\$date"
+            $lightsDisplay = "Good\$($fFolder.Name)\$sessionDate"
             Write-Host "`n[!] Missing Flats for $lightsDisplay (CalibRoot: $sessionCalibBase) (Original: $rawFilt, Target: $targetGrp, Angle: $angDisp)" -ForegroundColor Yellow
         } else {
             # Determine scores and default selection
             $defaultIdx = -1
+            $fullGreenIdx = -1
+            $shownAny = $false
+            $masterGreenIdx = -1
+            $shownIdx = @()
             for ($i=0; $i -lt $avail.Count; $i++) {
                 $fDirName = $avail[$i].Name
                 $notBad = ($fDirName -notmatch "\(")
@@ -275,23 +291,29 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                     } catch { $candDate = $null }
                 }
                 # session date parse
-                $sessDate = $null
-                if ($date -match '(?<!\d)(\d{2}\.\d{2}\.\d{2,4})(?!\d)') {
+                $sessDateObj = $null
+                if ($sessionDate -match '(?<!\d)(\d{2}\.\d{2}\.\d{2,4})(?!\d)') {
                     $sd = $Matches[1]
                     try {
                         if ($sd -match '\.\d{2}$') {
                             $parts = $sd -split '\.'
                             $y = [int]$parts[2]
                             if ($y -lt 50) { $y = 2000 + $y } else { $y = 1900 + $y }
-                            $sessDate = Get-Date "$($parts[0])/$($parts[1])/$y"
-                        } else { $sessDate = Get-Date $sd }
-                    } catch { $sessDate = $null }
+                            $sessDateObj = Get-Date "$($parts[0])/$($parts[1])/$y"
+                        } else { $sessDateObj = Get-Date $sd }
+                    } catch { $sessDateObj = $null }
                 }
                 $dateDiff = 9999
-                if ($candDate -and $sessDate) { $dateDiff = [Math]::Abs((New-TimeSpan -Start $candDate -End $sessDate).Days) }
+                if ($candDate -and $sessDateObj) { $dateDiff = [Math]::Abs((New-TimeSpan -Start $candDate -End $sessDateObj).Days) }
+
 
                 $fAng = if ($fDirName -match "(\d+)deg") { [int]$Matches[1] } else { -888 }
-                $angOk = ($numCurAng -ne -999 -and $fAng -ne -888 -and [Math]::Abs($numCurAng - $fAng) -le 2)
+                if ($numCurAng -ne -999 -and $fAng -ne -888) {
+                    $angDiff = AngleDiff180 $numCurAng $fAng
+                } else {
+                    $angDiff = 9999
+                }
+                $angOk = ($numCurAng -ne -999 -and $fAng -ne -888 -and $angDiff -le 2)
                 $filtOk = FlatFolderMatchesFilter $fDirName $flatAliases
 
                 $score = 0
@@ -304,31 +326,68 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 $avail[$i] | Add-Member -NotePropertyName Ang -NotePropertyValue $fAng -Force
                 $avail[$i] | Add-Member -NotePropertyName FiltOk -NotePropertyValue $filtOk -Force
 
-                if ($defaultIdx -eq -1 -and $notBad -and $filtOk -and $dateDiff -le 0) { $defaultIdx = $i }
+                # Подсветка и дефолт: зелёная строка = совпала дата и угол
+                $dateMatch = ($dateDiff -eq 0)
+                $angMatch = ($numCurAng -ne -999 -and $fAng -ne -888 -and $angDiff -le 2)
+                $rowColor = 'DarkGray'
+                if ($filtOk) {
+                    $shownIdx += $i
+                    if ($dateMatch -and $angMatch) {
+                        $rowColor = 'Green'
+                        if ($fullGreenIdx -eq -1) { $fullGreenIdx = $i }
+                        if ($avail[$i].Origin -eq 'Master' -and $masterGreenIdx -eq -1) { $masterGreenIdx = $i }
+                    } elseif ($dateMatch -or ($dateDiff -le 2) -or $angMatch) {
+                        $rowColor = 'Yellow'
+                    }
+                }
             }
+            # Приоритет Master среди зелёных, иначе первый зелёный, иначе первый жёлтый
+            if ($masterGreenIdx -ge 0) { $defaultIdx = $masterGreenIdx }
+            elseif ($fullGreenIdx -ge 0) { $defaultIdx = $fullGreenIdx }
+            else { $defaultIdx = -1 }
+            # defaultIdx должен быть только среди реально отображаемых
+            if ($defaultIdx -lt 0 -or ($shownIdx -notcontains $defaultIdx)) { $defaultIdx = -1 }
+            # (жёлтый по старой логике ниже)
 
-            Write-Host "Select flats for session (Good\$($fFolder.Name)\$date) from calib root: $sessionCalibBase" -ForegroundColor Cyan
+            # Выводим оба подходящих угла для подсказки
+            if ($numCurAng -ne -999) {
+                $altAng = ($numCurAng + 180) % 360
+                Write-Host ("Select flats for session (Good\$($fFolder.Name)\$sessionDate) from calib root: $sessionCalibBase | Angle: ${numCurAng}deg or ${altAng}deg") -ForegroundColor Cyan
+            } else {
+                Write-Host "Select flats for session (Good\$($fFolder.Name)\$sessionDate) from calib root: $sessionCalibBase" -ForegroundColor Cyan
+            }
             $shownAny = $false
             $fullGreenIdx = -1
             for ($i=0; $i -lt $avail.Count; $i++) {
                 $ent = $avail[$i]
                 if (-not $ent.FiltOk) { continue }
                 $shownAny = $true
+
                 # Цвета для даты и угла
                 $dateColor = 'White'; $angColor = 'White'; $rowColor = 'DarkGray'
                 $dateMatch = $ent.DateDiff -eq 0
                 $dateNear = ($ent.DateDiff -le 2)
-                $angMatch = ($numCurAng -ne -999 -and $ent.Ang -ne -888 -and [Math]::Abs($numCurAng - $ent.Ang) -le 0)
-                $angNear = ($numCurAng -ne -999 -and $ent.Ang -ne -888 -and [Math]::Abs($numCurAng - $ent.Ang) -le 2)
+
+                if ($numCurAng -ne -999 -and $ent.Ang -ne -888) {
+                    $angDiff = AngleDiff180 $numCurAng $ent.Ang
+                } else {
+                    $angDiff = 9999
+                }
+
+                $angMatch = ($numCurAng -ne -999 -and $ent.Ang -ne -888 -and $angDiff -le 2)
+                $angNear = ($numCurAng -ne -999 -and $ent.Ang -ne -888 -and $angDiff -le 5)
                 if ($dateMatch) { $dateColor = 'Green' } elseif ($dateNear) { $dateColor = 'Yellow' }
                 if ($angMatch) { $angColor = 'Green' } elseif ($angNear) { $angColor = 'Yellow' }
+
                 # Определяем цвет всей строки
                 if ($dateMatch -and $angMatch) { $rowColor = 'Green' }
                 elseif ($dateNear -or $angNear) { $rowColor = 'Yellow' }
                 else { $rowColor = 'DarkGray' }
+
                 # Дефолтный индекс — первый full match
                 if ($fullGreenIdx -eq -1 -and $rowColor -eq 'Green') { $fullGreenIdx = $i }
                 $relPath = $ent.FullName.Replace($sessionCalibBase, '').TrimStart('\')
+
                 # Формируем строку с цветными датой и углом
                 $idxStr = "[$i]".PadRight(5)
                 $origStr = "[$($ent.Origin)]".PadRight(10)
@@ -336,6 +395,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 $dateStr = $nameParts[0]
                 $restStr = $ent.Name.Substring($dateStr.Length).TrimStart()
                 if ($ent.Ang -ne -888) { $angStr = "$($ent.Ang)deg" } else { $angStr = "" }
+
                 # Удалить угол из restStr, если он есть
                 if ($angStr -ne "") {
                     $restStr = $restStr -replace "\s*\b$($ent.Ang)deg\b", ""
@@ -346,6 +406,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 $arrowPad = ""
                 if ($leftPart.Length -lt $arrowCol) { $arrowPad = ' ' * ($arrowCol - $leftPart.Length) }
                 $arrowPad += "<--"
+
                 # Выводим строку с цветными датой и углом
                 if ($rowColor -eq 'Green') {
                     Write-Host (" $idxStr $origStr ") -NoNewline -ForegroundColor White
@@ -363,9 +424,10 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                     Write-Host (" $idxStr $origStr $($ent.Name)$arrowPad $relPath") -ForegroundColor DarkGray
                 }
             }
+
             # Дефолтный индекс — первый full match (зелёная строка)
             if ($fullGreenIdx -ge 0) { $defaultIdx = $fullGreenIdx }
-            if ($defaultIdx -ge 0) { $dtext = " $defaultIdx" } else { $dtext = " - skip" }
+            if ($defaultIdx -ge 0 -and $defaultIdx -lt $avail.Count) { $dtext = " $defaultIdx" } else { $dtext = " - skip"; $defaultIdx = -1 }
             $prompt = "Select Index (Enter to accept default$dtext)"
             $idx = Read-Host -Prompt $prompt
             Write-Host ""
@@ -384,7 +446,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 $fdExp = $Matches[1] + "s"
                 $fd = Get-CalibPath "FlatDarks" $curGain $curTemp $fdExp $sessionCalibBase
                 if ($fd) {
-                    $fdTag = "Exp_${fdExp}_Gain_${curGain}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
+                $fdTag = "Exp_${fdExp}_Gain_${curGain}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
                     $pendingLinks += [PSCustomObject]@{ Type="FlatDarks"; Tag=$fdTag; Src=$fd.Path; Display=$fd.Display; Cam=$sessionCamFull }
                 }
             }
@@ -455,7 +517,8 @@ if ($pendingLinks.Count -gt 0) {
         }
         # Write-Host "  -> $target  <= $($l.Src)"
     }
-    if ((Read-Host "Create symlinks in Source? (y/n)") -match "^[yYdD]") {
+    $createChoice = Read-Host "Create symlinks in [Source]? (Y/n)"
+    if ($createChoice -eq '' -or $createChoice -match '^[yYдД]') {
         foreach ($l in $pendingLinks) {
             $target = Join-Path $sourcePath "$($l.Type)\$($l.Tag)"
             if (!(Test-Path $target)) { 
@@ -477,3 +540,38 @@ Write-Host "  GAIN     : gain                         (add to pre)" -ForegroundC
 Write-Host "  TEMP     : sensor temperature           (add to pre)" -ForegroundColor Yellow
 Write-Host "  EXP      : exposure time                (add to pre)" -ForegroundColor Yellow
 Write-Host "If unsure, add CAM both pre and post. FILTER/TARGET should be present before integration selection (pre)." -ForegroundColor Gray
+
+# --- После завершения сканирования и построения camMap ---
+
+$meta = @{
+    Object = $astroObj
+    Season = $season
+    Scope = $telSetup
+    GoodPath = $inputPath
+    PixPath = $pixPath
+    Cameras = @()
+}
+foreach ($cam in $camMap.Keys) {
+    $entry = $camMap[$cam]
+    $filters = ($entry.Sanitized | Select-Object -Unique)
+    $targets = ($entry.Targets | Select-Object -Unique)
+    # Калибровочные папки (поискать Master-корни для камеры)
+    $calibBase = "$baseZ\Calibration\$cam"
+    $calibFolders = @{
+        Darks = Join-Path $calibBase "Master\darks"
+        Biases = Join-Path $calibBase "Master\biases"
+        Flats = Join-Path $calibBase "Master\flats"
+        FlatDarks = Join-Path $calibBase "Master\flat-darks"
+    }
+    $meta.Cameras += @{
+        Name = $cam
+        Filters = $filters
+        Targets = $targets
+        CalibrationFolders = $calibFolders
+    }
+}
+
+# Сохраняем JSON рядом с Pix/Good
+$metaPath = Join-Path (Split-Path $pixPath -Parent) "project_meta.json"
+$meta | ConvertTo-Json -Depth 6 | Out-File -Encoding UTF8 $metaPath
+Write-Host "`n[INFO] Project metadata saved to: $metaPath" -ForegroundColor Cyan

@@ -16,14 +16,14 @@ if ($inputPath -match 'ASIAir\\(?<obj>[^\\]+)\\(?<season>[^\\]+)\\(?<tel>.*?) @ 
     $parsedSeason   = $Matches['season']
     $parsedTel      = $Matches['tel']
     $parsedCamShort = $Matches['cam']
-} else { Write-Host "Path parse error! Expected: ...\ASIAir\<Object>\<Season>\<Scope> @ <Cam>\..." -ForegroundColor Red; exit }
+} else { Write-Host "Path parse error! Expected: ...\ASIAir\<Object>\<Season>\<Scope> @ <Cam>\Good\<Filter>\<Date>" -ForegroundColor Red; exit }
 
 # ── Interactive parameter confirmation ───────────────────────────────────────
 function Confirm-Param {
     param([string]$Label, [string]$Detected)
     # Print label, arrow and detected value on one line, then prompt on same line
-    $labelPad = $Label.PadRight(10)
-    $detPad = $Detected.PadRight(35)
+    $labelPad = $Label.PadRight(6)
+    $detPad = $Detected.PadRight(25)
     Write-Host "  $labelPad -> " -ForegroundColor DarkGray -NoNewline
     Write-Host $detPad -ForegroundColor Yellow -NoNewline
     Write-Host "  >:" -ForegroundColor DarkGray -NoNewline
@@ -55,7 +55,7 @@ if (Test-Path $sourcePath) {
 foreach ($p in @($sourcePath, $pixPath)) { if (!(Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null } }
 
 Write-Host ""
-$mergeChoice = Read-Host "Allow WBPP to merge sessions with filters IRC and None into a single one L? (Y/n)"
+$mergeChoice = Read-Host "Allow WBPP to merge sessions with filters None, IRC and Trib into a single one L? (Y/n)"
 $mergeFilters = ($mergeChoice -eq '' -or $mergeChoice -match '^[yYдД]')
 
 $lightsRoot = "$baseZ\ASIAir\$astroObj\$season\$telSetup @ $camShort\Good"
@@ -70,25 +70,25 @@ function Get-FilterMap($rawFilt, $camType) {
     $r = $rawFilt.Trim()
     if ($camType -eq "OSC") {
         switch -Regex ($r) {
-            '^(IRC|Trib)$'         { return @{ Filt="L";    Target="RGB" } }
-            '^L$'                  { return @{ Filt="L";    Target="RGB" } }
-            '^None$'               { return @{ Filt="None"; Target="RGB" } }
-            '^(HO|UHC)$'           { return @{ Filt="HO";   Target="HO"  } }
-            '^SO$'                 { return @{ Filt="SO";   Target="SO"  } }
-            default                { return @{ Filt=$r;     Target=$r    } }
+            '^(IRC|Trib)$'         { return @{ Filter="L";    Target="RGB" } }
+            '^L$'                  { return @{ Filter="L";    Target="RGB" } }
+            '^None$'               { return @{ Filter="None"; Target="RGB" } }
+            '^(HO|UHC)$'           { return @{ Filter="HO";   Target="HO"  } }
+            '^SO$'                 { return @{ Filter="SO";   Target="SO"  } }
+            default                { return @{ Filter=$r;     Target=$r    } }
         }
     } else {
         # Mono
         switch -Regex ($r) {
-            '^L$'                  { return @{ Filt="L";    Target="L" } }
-            '^None$'               { return @{ Filt="None"; Target="None" } }
-            '^R$'                  { return @{ Filt="R";    Target="R" } }
-            '^G$'                  { return @{ Filt="G";    Target="G" } }
-            '^B$'                  { return @{ Filt="B";    Target="B" } }
-            '^(H|Ha)$'             { return @{ Filt="H";    Target="H"   } }
-            '^(S|SII)$'            { return @{ Filt="S";    Target="S"   } }
-            '^(O|OIII|OII)$'       { return @{ Filt="O";    Target="O"   } }
-            default                { return @{ Filt=$r;     Target=$r    } }
+            '^L$'                  { return @{ Filter="L";    Target="L" } }
+            '^None$'               { return @{ Filter="None"; Target="None" } }
+            '^R$'                  { return @{ Filter="R";    Target="R" } }
+            '^G$'                  { return @{ Filter="G";    Target="G" } }
+            '^B$'                  { return @{ Filter="B";    Target="B" } }
+            '^(H|Ha)$'             { return @{ Filter="H";    Target="H"   } }
+            '^(S|SII)$'            { return @{ Filter="S";    Target="S"   } }
+            '^(O|OIII|OII)$'       { return @{ Filter="O";    Target="O"   } }
+            default                { return @{ Filter=$r;     Target=$r    } }
         }
     }
 }
@@ -105,7 +105,19 @@ function Get-CalibPath($type, $gain, $rawTemp, $expValue, $cb) {
             $finalPath = $base
             if ($expValue) {
                 $cleanExp = ($expValue -replace '[^0-9\.]', '').Replace(".0","")
-                $expDir = Get-ChildItem $base -Directory | Where-Object { $_.Name -like "$cleanExp*" } | Select-Object -First 1
+                # Improved exposure folder matching - exact match first, then prefix match
+                $expDir = Get-ChildItem $base -Directory | Where-Object { 
+                    $folderExp = ($_.Name -replace '[^0-9\.]', '').Replace(".0","")
+                    $folderExp -eq $cleanExp 
+                } | Select-Object -First 1
+                
+                # If no exact match found, try prefix match (for backwards compatibility)
+                if (-not $expDir) {
+                    $expDir = Get-ChildItem $base -Directory | Where-Object { 
+                        $_.Name -like "$cleanExp*" 
+                    } | Sort-Object Name | Select-Object -First 1
+                }
+                
                 if ($expDir) { $finalPath = $expDir.FullName } else { continue }
             }
             $display = $finalPath.Replace($cb, "").TrimStart("\")
@@ -146,21 +158,28 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
         }
 
         # 2. EXTRACT RAW FILTER FROM FILENAME
-        $rawFilt = "Unknown"
-        if ($fName -match "_$( [regex]::Escape($camInFile) )_(?<realFilt>[^_]+)_gain") {
-            $rawFilt = $Matches['realFilt']
+        $rawFilt = "None"  # Default to None if filter cannot be determined
+        # Try to extract filter between camera and _gain pattern
+        if ($fName -match "_$( [regex]::Escape($camInFile) )_(?<realFilt>[^_]+)?_gain") {
+            $capturedFilt = $Matches['realFilt']
+            if ($capturedFilt -and $capturedFilt.Trim() -ne "") {
+                $rawFilt = $capturedFilt
+            }
+            # If nothing captured or empty, rawFilt remains "None"
         }
+        # DEBUG: Uncomment next line to see filename parsing
+        # Write-Host "[DEBUG] File: $fName | Cam: $camInFile | Filter: $rawFilt" -ForegroundColor DarkGray
 
         # 3. MAP TO NORMALIZED FILTER + WBPP TARGET
         $fm        = Get-FilterMap $rawFilt $sessionCamType
-        $filt      = $fm.Filt
+        $filt      = $fm.Filter
         $targetGrp = $fm.Target
 
         # Optional: Merge IRC/None into L for OSC cameras if user agrees
         if ($mergeFilters -and $sessionCamType -eq "OSC" -and ($rawFilt -eq "None" -or $rawFilt -eq "IRC" -or $rawFilt -eq "Trib")) {
             $filt = "L"
+            $targetGrp = "RGB"  # Ensure unified target group for merged filters
         }
-
 
         $camMap[$sessionCamFull].Observed += $rawFilt
         $camMap[$sessionCamFull].Sanitized += $filt
@@ -192,16 +211,25 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
         # but "None" and "L" are kept separate (different flat corrections).
         $flatAliases = @()
         $flatAliases += $rawFilt
-        $flatAliases += $filt
-        # Add known synonyms for the normalized filter
-        switch ($filt) {
+        # Remove addition of normalized filters to $flatAliases
+        # $flatAliases += $filt
+        # Add known synonyms for the raw filter only
+        switch ($rawFilt) {
             "L"    { $flatAliases += "IRC"; $flatAliases += "Trib" }
             "H"    { $flatAliases += "Ha" }
+            "Ha"   { $flatAliases += "H" }
             "S"    { $flatAliases += "SII" }
+            "SII"  { $flatAliases += "S" }
             "O"    { $flatAliases += "OIII" }
+            "OIII" { $flatAliases += "O" }
             "HO"   { $flatAliases += "UHC" }
+            "UHC"  { $flatAliases += "HO" }
         }
         $flatAliases = $flatAliases | Select-Object -Unique
+        
+        
+        # DEBUG: Show filter aliases
+        # Write-Host "[DEBUG] Raw filter: $rawFilt | Aliases: $($flatAliases -join ', ')" -ForegroundColor Magenta
 
         # --- Robust filter match: look for filter as separate word or after date ---
         function FlatFolderMatchesFilter($folderName, $aliases) {
@@ -209,26 +237,35 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
             $rest = $folderName.Substring(8).TrimStart()
             $filtPart = $null
             if ($rest -match '^(filt)?([^ _]+)') { $filtPart = $Matches[2] }
-            <#
-            Write-Host "[DEBUG] FlatFolder: $folderName | Parsed date: $datePart | Parsed filter: $filtPart | Aliases: $($aliases -join ', ')" -ForegroundColor DarkGray
-            #>
+            
+            # DEBUG: Uncomment for debugging filter matching
+            # Write-Host "[DEBUG] FlatFolder: $folderName | Parsed date: $datePart | Parsed filter: $filtPart | Aliases: $($aliases -join ', ')" -ForegroundColor DarkGray
+            
             foreach ($alias in $aliases) {
-                if ($filtPart -eq $alias) { <#Write-Host "[DEBUG]   MATCH: $folderName <-> $alias" -ForegroundColor Green;#> return $true }
+                if ($filtPart -eq $alias) { 
+                    # Write-Host "[DEBUG]   MATCH: $folderName <-> $alias" -ForegroundColor Green
+                    return $true 
+                }
             }
-            <#Write-Host "[DEBUG]   SKIP: $folderName (no filter match)" -ForegroundColor Yellow#>
+            # Write-Host "[DEBUG]   SKIP: $folderName (no filter match)" -ForegroundColor Yellow
             return $false
         }
 
         # Known filters for validation
         $knownFilters = @('L','None','R','G','B','H','Ha','S','SII','O','OIII','IRC','Trib','HO','UHC','SO')
 
-        # Helper: try to parse date as yy.MM.dd or dd.MM.yy
+        # Helper: parse date in yy.MM.dd format only
         function ParseDate($dateStr) {
-            $formats = @('yy.MM.dd','dd.MM.yy')
-            foreach ($fmt in $formats) {
-                try { return [datetime]::ParseExact($dateStr, $fmt, $null) } catch {} 
+            try { 
+                $parsedDate = [datetime]::ParseExact($dateStr, 'yy.MM.dd', $null)
+                # Fix year interpretation for 2-digit years (assume 2000s for years 00-99)
+                if ($parsedDate.Year -lt 2000) {
+                    $parsedDate = $parsedDate.AddYears(100)
+                }
+                return $parsedDate 
+            } catch { 
+                return $null
             }
-            return $null
         }
 
         # Collect all candidate flats from Master and Source and always show menu for user selection
@@ -279,33 +316,16 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 $candDateStr = if ($fDirName -match '(?<!\d)(\d{2}\.\d{2}\.\d{2,4})(?!\d)') { $Matches[1] } else { $null }
                 $candDate = $null
                 if ($candDateStr) {
-                    try {
-                        if ($candDateStr -match '\.\d{2}$') {
-                            $parts = $candDateStr -split '\.'
-                            $y = [int]$parts[2]
-                            if ($y -lt 50) { $y = 2000 + $y } else { $y = 1900 + $y }
-                            $candDate = Get-Date "$($parts[0])/$($parts[1])/$y"
-                        } else {
-                            $candDate = Get-Date $candDateStr
-                        }
-                    } catch { $candDate = $null }
+                    $candDate = ParseDate $candDateStr
                 }
                 # session date parse
                 $sessDateObj = $null
                 if ($sessionDate -match '(?<!\d)(\d{2}\.\d{2}\.\d{2,4})(?!\d)') {
                     $sd = $Matches[1]
-                    try {
-                        if ($sd -match '\.\d{2}$') {
-                            $parts = $sd -split '\.'
-                            $y = [int]$parts[2]
-                            if ($y -lt 50) { $y = 2000 + $y } else { $y = 1900 + $y }
-                            $sessDateObj = Get-Date "$($parts[0])/$($parts[1])/$y"
-                        } else { $sessDateObj = Get-Date $sd }
-                    } catch { $sessDateObj = $null }
+                    $sessDateObj = ParseDate $sd
                 }
                 $dateDiff = 9999
                 if ($candDate -and $sessDateObj) { $dateDiff = [Math]::Abs((New-TimeSpan -Start $candDate -End $sessDateObj).Days) }
-
 
                 $fAng = if ($fDirName -match "(\d+)deg") { [int]$Matches[1] } else { -888 }
                 if ($numCurAng -ne -999 -and $fAng -ne -888) {
@@ -326,47 +346,195 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 $avail[$i] | Add-Member -NotePropertyName Ang -NotePropertyValue $fAng -Force
                 $avail[$i] | Add-Member -NotePropertyName FiltOk -NotePropertyValue $filtOk -Force
 
-                # Подсветка и дефолт: зелёная строка = совпала дата и угол
+                # Smart flat matching logic with priority system (fixed date vs angle priority)
                 $dateMatch = ($dateDiff -eq 0)
                 $angMatch = ($numCurAng -ne -999 -and $fAng -ne -888 -and $angDiff -le 2)
+                
+                # Calculate date relationship for smart matching
+                $dateInPast = ($candDate -and $sessDateObj -and $candDate -lt $sessDateObj)
+                $dateInNearFuture = ($candDate -and $sessDateObj -and $candDate -gt $sessDateObj -and $dateDiff -le 2)
+                $dateNear = ($dateDiff -le 2)
+                
                 $rowColor = 'DarkGray'
                 if ($filtOk) {
                     $shownIdx += $i
                     if ($dateMatch -and $angMatch) {
+                        # Perfect match: exact date + angle
                         $rowColor = 'Green'
                         if ($fullGreenIdx -eq -1) { $fullGreenIdx = $i }
                         if ($avail[$i].Origin -eq 'Master' -and $masterGreenIdx -eq -1) { $masterGreenIdx = $i }
-                    } elseif ($dateMatch -or ($dateDiff -le 2) -or $angMatch) {
+                    } elseif ($dateMatch -or $dateNear) {
+                        # Good match by DATE: exact or close date (priority over angles)
+                        $rowColor = 'Yellow'
+                    } elseif ($angMatch) {
+                        # Match by ANGLE only (lower priority)
                         $rowColor = 'Yellow'
                     }
+                    # Note: Blue coloring for smart matches will be determined later in the display loop
                 }
             }
-            # Приоритет Master среди зелёных, иначе первый зелёный, иначе первый жёлтый
+            # Приоритет выбора по умолчанию с исправленной логикой:
+            # 1. Master среди зелёных (точное совпадение даты+угла)
+            # 2. Любой зелёный (точное совпадение даты+угла)  
+            # 3. Master среди жёлтых с совпадением ПО ДАТЕ (приоритет даты над углом)
+            # 4. Любой жёлтый с совпадением ПО ДАТЕ  
+            # 5. Master среди синих - ближайший в прошлом
+            # 6. Любой синий - ближайший в прошлом
+            # 7. Master среди синих - ближайший в будущем (1-2 дня)
+            # 8. Любой синий - ближайший в будущем (1-2 дня)
+            # 9. Master среди жёлтых с совпадением ПО УГЛУ (углы в последнюю очередь)
+            # 10. Любой жёлтый с совпадением ПО УГЛУ
+            $masterYellowDateIdx = -1
+            $yellowDateIdx = -1
+            $masterYellowAngleIdx = -1
+            $yellowAngleIdx = -1
+            $masterClosestPastIdx = -1
+            $closestPastIdx = -1
+            $masterClosestFutureIdx = -1
+            $closestFutureIdx = -1
+            
+            $closestPastDays = 9999
+            $closestFutureDays = 9999
+            
+            # Собираем индексы по приоритетам с поиском ближайших дат
+            for ($i=0; $i -lt $avail.Count; $i++) {
+                if (-not $avail[$i].FiltOk) { continue }
+                
+                $fDirName = $avail[$i].Name
+                $candDateStr = if ($fDirName -match '(?<!\d)(\d{2}\.\d{2}\.\d{2,4})(?!\d)') { $Matches[1] } else { $null }
+                $candDate = $null
+                if ($candDateStr) {
+                    $candDate = ParseDate $candDateStr
+                }
+                
+                $dateDiff = 9999
+                if ($candDate -and $sessDateObj) { $dateDiff = [Math]::Abs((New-TimeSpan -Start $candDate -End $sessDateObj).Days) }
+                
+                $dateMatch = ($dateDiff -eq 0)
+                $dateNear = ($dateDiff -le 2)
+                $fAng = if ($fDirName -match "(\d+)deg") { [int]$Matches[1] } else { -888 }
+                $angMatch = ($numCurAng -ne -999 -and $fAng -ne -888 -and (AngleDiff180 $numCurAng $fAng) -le 2)
+                
+                $dateInPast = ($candDate -and $sessDateObj -and $candDate -lt $sessDateObj)
+                $dateInNearFuture = ($candDate -and $sessDateObj -and $candDate -gt $sessDateObj -and $dateDiff -le 2)
+                
+                # Классификация по типам совпадений с приоритетом даты
+                if ($dateMatch -and $angMatch) {
+                    # Зелёные (уже обработаны выше в первом цикле)
+                } elseif ($dateMatch -or $dateNear) {
+                    # Жёлтые по ДАТЕ - высший приоритет среди жёлтых
+                    if ($yellowDateIdx -eq -1) { $yellowDateIdx = $i }
+                    if ($avail[$i].Origin -eq 'Master' -and $masterYellowDateIdx -eq -1) { $masterYellowDateIdx = $i }
+                } elseif ($dateInPast) {
+                    # Синие в прошлом - ищем ближайший (самый свежий), менее строго фильтруем по углам
+                    $pastAngleConflict = ($numCurAng -ne -999 -and $fAng -ne -888 -and (AngleDiff180 $numCurAng $fAng) -gt 30)
+                    if (-not $pastAngleConflict -and $dateDiff -lt $closestPastDays) {
+                        $closestPastDays = $dateDiff
+                        $closestPastIdx = $i
+                        if ($avail[$i].Origin -eq 'Master') { $masterClosestPastIdx = $i }
+                    } elseif (-not $pastAngleConflict -and $dateDiff -eq $closestPastDays) {
+                        # Если дата та же, предпочитаем совпадающий угол
+                        if ($angMatch -and -not ($numCurAng -ne -999 -and $avail[$closestPastIdx].Ang -ne -888 -and (AngleDiff180 $numCurAng $avail[$closestPastIdx].Ang) -le 2)) {
+                            $closestPastIdx = $i
+                        }
+                        if ($avail[$i].Origin -eq 'Master') {
+                            if ($masterClosestPastIdx -eq -1) {
+                                $masterClosestPastIdx = $i
+                            } elseif ($angMatch -and -not ($numCurAng -ne -999 -and $avail[$masterClosestPastIdx].Ang -ne -888 -and (AngleDiff180 $numCurAng $avail[$masterClosestPastIdx].Ang) -le 2)) {
+                                $masterClosestPastIdx = $i
+                            }
+                        }
+                    }
+                } elseif ($dateInNearFuture) {
+                    # Синие в ближайшем будущем - ищем ближайший, НО отклоняем несовместимые углы
+                    $futureAngleConflict = ($numCurAng -ne -999 -and $fAng -ne -888 -and (AngleDiff180 $numCurAng $fAng) -gt 10)
+                    if (-not $futureAngleConflict -and $dateDiff -lt $closestFutureDays) {
+                        $closestFutureDays = $dateDiff
+                        $closestFutureIdx = $i
+                        if ($avail[$i].Origin -eq 'Master') { $masterClosestFutureIdx = $i }
+                    } elseif (-not $futureAngleConflict -and $dateDiff -eq $closestFutureDays) {
+                        # Если дата та же, предпочитаем совпадающий угол
+                        if ($angMatch -and -not ($numCurAng -ne -999 -and $avail[$closestFutureIdx].Ang -ne -888 -and (AngleDiff180 $numCurAng $avail[$closestFutureIdx].Ang) -le 2)) {
+                            $closestFutureIdx = $i
+                        }
+                        if ($avail[$i].Origin -eq 'Master') {
+                            if ($masterClosestFutureIdx -eq -1) {
+                                $masterClosestFutureIdx = $i
+                            } elseif ($angMatch -and -not ($numCurAng -ne -999 -and $avail[$masterClosestFutureIdx].Ang -ne -888 -and (AngleDiff180 $numCurAng $avail[$masterClosestFutureIdx].Ang) -le 2)) {
+                                $masterClosestFutureIdx = $i
+                            }
+                        }
+                    }
+                } elseif ($angMatch) {
+                    # Жёлтые по УГЛУ - низший приоритет среди жёлтых
+                    if ($yellowAngleIdx -eq -1) { $yellowAngleIdx = $i }
+                    if ($avail[$i].Origin -eq 'Master' -and $masterYellowAngleIdx -eq -1) { $masterYellowAngleIdx = $i }
+                }
+            }
+            
+            # Выбираем дефолтный индекс: ДАТА - основной критерий, УГОЛ - уточняющий
             if ($masterGreenIdx -ge 0) { $defaultIdx = $masterGreenIdx }
             elseif ($fullGreenIdx -ge 0) { $defaultIdx = $fullGreenIdx }
+            elseif ($masterYellowDateIdx -ge 0) { $defaultIdx = $masterYellowDateIdx }
+            elseif ($yellowDateIdx -ge 0) { $defaultIdx = $yellowDateIdx }
+            elseif ($masterClosestPastIdx -ge 0) { $defaultIdx = $masterClosestPastIdx }
+            elseif ($closestPastIdx -ge 0) { $defaultIdx = $closestPastIdx }
+            elseif ($masterClosestFutureIdx -ge 0) { $defaultIdx = $masterClosestFutureIdx }
+            elseif ($closestFutureIdx -ge 0) { $defaultIdx = $closestFutureIdx }
+            elseif ($masterYellowAngleIdx -ge 0) { $defaultIdx = $masterYellowAngleIdx }
+            elseif ($yellowAngleIdx -ge 0) { $defaultIdx = $yellowAngleIdx }
             else { $defaultIdx = -1 }
-            # defaultIdx должен быть только среди реально отображаемых
-            if ($defaultIdx -lt 0 -or ($shownIdx -notcontains $defaultIdx)) { $defaultIdx = -1 }
-            # (жёлтый по старой логике ниже)
 
             # Выводим оба подходящих угла для подсказки
+            Write-Host "Select flats from calibration root: $sessionCalibBase" -ForegroundColor Cyan
+            Write-Host "Session: Good\$($fFolder.Name)\$sessionDate" -ForegroundColor Cyan
             if ($numCurAng -ne -999) {
                 $altAng = ($numCurAng + 180) % 360
-                Write-Host ("Select flats for session (Good\$($fFolder.Name)\$sessionDate) from calib root: $sessionCalibBase | Angle: ${numCurAng}deg or ${altAng}deg") -ForegroundColor Cyan
-            } else {
-                Write-Host "Select flats for session (Good\$($fFolder.Name)\$sessionDate) from calib root: $sessionCalibBase" -ForegroundColor Cyan
+                Write-Host "Angle: ${numCurAng}deg or ${altAng}deg" -ForegroundColor Cyan
             }
-            $shownAny = $false
-            $fullGreenIdx = -1
+            else {
+                Write-Host "Angle: Unknown" -ForegroundColor Cyan
+            }
+
+            # Create display mapping for shown items with continuous indices
+            $displayItems = @()
+            $originalToDisplayMap = @{}
+            $displayToOriginalMap = @{}
+            $displayDefaultIdx = -1
+            
             for ($i=0; $i -lt $avail.Count; $i++) {
                 $ent = $avail[$i]
                 if (-not $ent.FiltOk) { continue }
+                
+                $displayIdx = $displayItems.Count
+                $displayItems += $ent
+                $originalToDisplayMap[$i] = $displayIdx
+                $displayToOriginalMap[$displayIdx] = $i
+                
+                # Map default index from original to display
+                if ($defaultIdx -eq $i) { $displayDefaultIdx = $displayIdx }
+            }
+
+            $shownAny = $false
+            for ($displayIdx=0; $displayIdx -lt $displayItems.Count; $displayIdx++) {
+                $ent = $displayItems[$displayIdx]
+                $originalIdx = $displayToOriginalMap[$displayIdx]
                 $shownAny = $true
 
-                # Цвета для даты и угла
+                # Цвета для даты и угла с улучшенной логикой
                 $dateColor = 'White'; $angColor = 'White'; $rowColor = 'DarkGray'
                 $dateMatch = $ent.DateDiff -eq 0
                 $dateNear = ($ent.DateDiff -le 2)
+                
+                # Пересчитываем даты для текущей строки
+                $candDateStr = if ($ent.Name -match '(?<!\d)(\d{2}\.\d{2}\.\d{2,4})(?!\d)') { $Matches[1] } else { $null }
+                $candDate = $null
+                if ($candDateStr) {
+                    $candDate = ParseDate $candDateStr
+                }
+                
+                $dateInPast = ($candDate -and $sessDateObj -and $candDate -lt $sessDateObj)
+                $dateInNearFuture = ($candDate -and $sessDateObj -and $candDate -gt $sessDateObj -and $ent.DateDiff -le 2)
 
                 if ($numCurAng -ne -999 -and $ent.Ang -ne -888) {
                     $angDiff = AngleDiff180 $numCurAng $ent.Ang
@@ -376,20 +544,30 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
 
                 $angMatch = ($numCurAng -ne -999 -and $ent.Ang -ne -888 -and $angDiff -le 2)
                 $angNear = ($numCurAng -ne -999 -and $ent.Ang -ne -888 -and $angDiff -le 5)
-                if ($dateMatch) { $dateColor = 'Green' } elseif ($dateNear) { $dateColor = 'Yellow' }
-                if ($angMatch) { $angColor = 'Green' } elseif ($angNear) { $angColor = 'Yellow' }
+                
+                # Определяем, является ли этот флэт одним из выбранных ближайших (using original indices)
+                $isClosestPast = ($closestPastIdx -eq $originalIdx -or $masterClosestPastIdx -eq $originalIdx)
+                $isClosestFuture = ($closestFutureIdx -eq $originalIdx -or $masterClosestFutureIdx -eq $originalIdx)
+                
+                # Color coding for dates
+                if ($dateMatch) { $dateColor = 'Green' } 
+                elseif ($dateNear) { $dateColor = 'Yellow' }
+                elseif ($isClosestPast -or $isClosestFuture) { $dateColor = 'Blue' }
+                
+                # Color coding for angles
+                if ($angMatch) { $angColor = 'Green' } 
+                elseif ($angNear) { $angColor = 'Yellow' }
 
-                # Определяем цвет всей строки
+                # Определяем цвет всей строки с новой логикой
                 if ($dateMatch -and $angMatch) { $rowColor = 'Green' }
+                elseif ($dateMatch -or $angMatch) { $rowColor = 'Yellow' }
+                elseif ($isClosestPast -or $isClosestFuture) { $rowColor = 'Blue' }
                 elseif ($dateNear -or $angNear) { $rowColor = 'Yellow' }
                 else { $rowColor = 'DarkGray' }
-
-                # Дефолтный индекс — первый full match
-                if ($fullGreenIdx -eq -1 -and $rowColor -eq 'Green') { $fullGreenIdx = $i }
                 $relPath = $ent.FullName.Replace($sessionCalibBase, '').TrimStart('\')
 
-                # Формируем строку с цветными датой и углом
-                $idxStr = "[$i]".PadRight(5)
+                # Формируем строку с цветными датой и углом (using display index)
+                $idxStr = "[$displayIdx]".PadRight(5)
                 $origStr = "[$($ent.Origin)]".PadRight(10)
                 $nameParts = $ent.Name -split ' '
                 $dateStr = $nameParts[0]
@@ -400,45 +578,129 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 if ($angStr -ne "") {
                     $restStr = $restStr -replace "\s*\b$($ent.Ang)deg\b", ""
                 }
-                # Динамическое выравнивание стрелки
+                # Выравнивание стрелки - максимальная длина строки до стрелочки 53 символа
                 $leftPart = " $idxStr $origStr $dateStr $restStr $angStr"
-                $arrowCol = 45
+                $arrowCol = 53
                 $arrowPad = ""
-                if ($leftPart.Length -lt $arrowCol) { $arrowPad = ' ' * ($arrowCol - $leftPart.Length) }
+                if ($leftPart.Length -lt $arrowCol) { 
+                    $arrowPad = ' ' * ($arrowCol - $leftPart.Length) 
+                } else {
+                    # Если строка превышает лимит, добавляем минимальный отступ
+                    $arrowPad = "  "
+                }
                 $arrowPad += "<--"
 
-                # Выводим строку с цветными датой и углом
+                # Определяем цвет индекса - зелёный для дефолтного выбора (using display index)
+                $idxColor = if ($displayIdx -eq $displayDefaultIdx) { 'Green' } else { 'White' }
+
+                # Выводим строку с цветными датой и углом и поддержкой Blue для умных флэтов
                 if ($rowColor -eq 'Green') {
-                    Write-Host (" $idxStr $origStr ") -NoNewline -ForegroundColor White
+                    Write-Host " " -NoNewline
+                    Write-Host $idxStr -NoNewline -ForegroundColor $idxColor
+                    Write-Host " $origStr " -NoNewline -ForegroundColor White
                     Write-Host $dateStr -NoNewline -ForegroundColor Green
                     Write-Host (" $restStr ") -NoNewline -ForegroundColor White
                     if ($angStr -ne "") { Write-Host $angStr -NoNewline -ForegroundColor Green }
                     Write-Host ("$arrowPad $relPath") -ForegroundColor Green
                 } elseif ($rowColor -eq 'Yellow') {
-                    Write-Host (" $idxStr $origStr ") -NoNewline -ForegroundColor White
+                    Write-Host " " -NoNewline
+                    Write-Host $idxStr -NoNewline -ForegroundColor $idxColor
+                    Write-Host " $origStr " -NoNewline -ForegroundColor White
                     Write-Host $dateStr -NoNewline -ForegroundColor $dateColor
                     Write-Host (" $restStr ") -NoNewline -ForegroundColor White
                     if ($angStr -ne "") { Write-Host $angStr -NoNewline -ForegroundColor $angColor }
                     Write-Host ("$arrowPad $relPath") -ForegroundColor Yellow
+                } elseif ($rowColor -eq 'Blue') {
+                    # Smart match: closest past or near future flats
+                    Write-Host " " -NoNewline
+                    Write-Host $idxStr -NoNewline -ForegroundColor $idxColor
+                    Write-Host " $origStr " -NoNewline -ForegroundColor White
+                    Write-Host $dateStr -NoNewline -ForegroundColor Blue
+                    Write-Host (" $restStr ") -NoNewline -ForegroundColor White
+                    if ($angStr -ne "") { Write-Host $angStr -NoNewline -ForegroundColor $angColor }
+                    Write-Host ("$arrowPad $relPath") -ForegroundColor Blue
                 } else {
-                    Write-Host (" $idxStr $origStr $($ent.Name)$arrowPad $relPath") -ForegroundColor DarkGray
+                    # Серые строки тоже используют разбивку на компоненты для правильного выравнивания
+                    Write-Host " " -NoNewline
+                    Write-Host $idxStr -NoNewline -ForegroundColor $idxColor
+                    Write-Host " $origStr $dateStr $restStr $angStr$arrowPad $relPath" -ForegroundColor DarkGray
                 }
             }
 
-            # Дефолтный индекс — первый full match (зелёная строка)
-            if ($fullGreenIdx -ge 0) { $defaultIdx = $fullGreenIdx }
-            if ($defaultIdx -ge 0 -and $defaultIdx -lt $avail.Count) { $dtext = " $defaultIdx" } else { $dtext = " - skip"; $defaultIdx = -1 }
-            $prompt = "Select Index (Enter to accept default$dtext)"
-            $idx = Read-Host -Prompt $prompt
+            # Дефолтный индекс — используем ранее вычисленный fullGreenIdx или masterGreenIdx
+            # Если нет точных совпадений, но есть фильтр совпадающий по дате - сделать дефолтом
+            if ($displayDefaultIdx -eq -1) {
+                for ($displayIdx=0; $displayIdx -lt $displayItems.Count; $displayIdx++) {
+                    $ent = $displayItems[$displayIdx]
+                    if ($ent.FiltOk -and $ent.DateDiff -eq 0) {
+                        $displayDefaultIdx = $displayIdx
+                        break
+                    }
+                }
+            }
+            
+            # Если все еще нет дефолта, берем первый доступный
+            if ($displayDefaultIdx -eq -1 -and $displayItems.Count -gt 0) {
+                $displayDefaultIdx = 0
+            }
+            
+            if ($displayDefaultIdx -ge 0 -and $displayDefaultIdx -lt $displayItems.Count) { 
+                $dtext = " $displayDefaultIdx" 
+            } else { 
+                $dtext = " 0"  # fallback
+                $displayDefaultIdx = 0
+            }
+            
+            # Input validation loop
+            do {
+                $prompt = "Select Index (Enter to accept default$dtext)"
+                $idx = Read-Host -Prompt $prompt
+                $validInput = $false
+                $selectedIdx = -1
+                
+                if ($idx.Trim() -eq "") {
+                    # Default selection
+                    $selectedIdx = $displayDefaultIdx
+                    $validInput = $true
+                } elseif ($idx -match '^\d+$') {
+                    $selectedIdx = [int]$idx
+                    if ($selectedIdx -ge 0 -and $selectedIdx -lt $displayItems.Count) {
+                        $validInput = $true
+                    } else {
+                        Write-Host "[!] Invalid index. Please enter a number between 0 and $($displayItems.Count - 1)" -ForegroundColor Red
+                    }
+                } else {
+                    Write-Host "[!] Invalid input. Please enter a number or press Enter for default" -ForegroundColor Red
+                }
+            } while (-not $validInput)
+            
             Write-Host ""
-            if ($idx -match '^\d+$') { $fFound = $avail[[int]$idx]; $foundIn = $fFound.Origin }
-            elseif ($idx.Trim() -eq "" -and $defaultIdx -ge 0) { $fFound = $avail[$defaultIdx]; $foundIn = $fFound.Origin }
+            $fFound = $displayItems[$selectedIdx]
+            $foundIn = $fFound.Origin
         }
 
         if ($fFound) {
             # Clean leading slash for flats display too
             $fDisp = "$foundIn\flats\$telSetup\$($fFound.Name)"
             $pendingLinks += [PSCustomObject]@{ Type="Flats"; Tag=$sTag; Src=$fFound.FullName; Display=$fDisp; Cam=$sessionCamFull }
+
+            # Check for potential keyword conflicts in flat files
+            $flatFiles = Get-ChildItem $fFound.FullName -Filter "*.fit*" -ErrorAction SilentlyContinue
+            if ($flatFiles) {
+                foreach ($flatFile in $flatFiles) {
+                    $fileName = $flatFile.Name
+                    # Check if filename contains FILTER keyword (case-insensitive) that conflicts with our mapping
+                    if ($fileName -match "(?i)filter[_-]([^_\s\.]+)") {
+                        $fileFilter = $Matches[1]
+                        if ($fileFilter -and $fileFilter -ne $filt) {
+                            Write-Host "[!] KEYWORD CONFLICT WARNING: File '$fileName'" -ForegroundColor Red
+                            Write-Host "    File contains FILTER=$fileFilter but our mapping expects FILTER=$filt" -ForegroundColor Red
+                            Write-Host "    WBPP may use the filename keyword instead of our normalized value" -ForegroundColor Yellow
+                            Write-Host "    Consider renaming the file to use FILTER=$filt for consistency" -ForegroundColor Yellow
+                        }
+                    }
+                }
+            }
 
             # Flat-Darks
             $fSample = Get-ChildItem $fFound.FullName -Filter "*.fit*" | Select-Object -First 1
@@ -448,6 +710,20 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 if ($fd) {
                 $fdTag = "Exp_${fdExp}_Gain_${curGain}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
                     $pendingLinks += [PSCustomObject]@{ Type="FlatDarks"; Tag=$fdTag; Src=$fd.Path; Display=$fd.Display; Cam=$sessionCamFull }
+                    # Check for potential keyword conflicts in flat-dark files
+                    $flatDarkFiles = Get-ChildItem $fd.Path -Filter "*.fit*" -ErrorAction SilentlyContinue
+                    if ($flatDarkFiles) {
+                        foreach ($flatDarkFile in ($flatDarkFiles | Select-Object -First 3)) {  # Check only first 3 files for performance
+                            $fileName = $flatDarkFile.Name
+                            if ($fileName -match "(?i)filter[_-]([^_\s\.]+)") {
+                                $fileFilter = $Matches[1]
+                                if ($fileFilter -and $fileFilter -ne $filt) {
+                                    Write-Host "[!] KEYWORD CONFLICT WARNING: FlatDark file '$fileName'" -ForegroundColor Red
+                                    Write-Host "    File contains FILTER=$fileFilter but our mapping expects FILTER=$filt" -ForegroundColor Red
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -540,6 +816,13 @@ Write-Host "  GAIN     : gain                         (add to pre)" -ForegroundC
 Write-Host "  TEMP     : sensor temperature           (add to pre)" -ForegroundColor Yellow
 Write-Host "  EXP      : exposure time                (add to pre)" -ForegroundColor Yellow
 Write-Host "If unsure, add CAM both pre and post. FILTER/TARGET should be present before integration selection (pre)." -ForegroundColor Gray
+
+Write-Host "`n--- IMPORTANT: Keyword Conflicts ---" -ForegroundColor Cyan
+Write-Host "If you see KEYWORD CONFLICT warnings above:" -ForegroundColor Gray  
+Write-Host "- WBPP may prioritize filename keywords over your custom FILTER keywords" -ForegroundColor Yellow
+Write-Host "- This can cause calibration frame mismatches (e.g., Ha flats not matching H lights)" -ForegroundColor Yellow
+Write-Host "- Consider renaming conflicting files to use normalized filter names (Ha->H, OIII->O, SII->S)" -ForegroundColor Yellow
+Write-Host "- Alternative: Use WBPP's 'Smart naming override' option and clear/reload file list" -ForegroundColor Gray
 
 # --- После завершения сканирования и построения camMap ---
 

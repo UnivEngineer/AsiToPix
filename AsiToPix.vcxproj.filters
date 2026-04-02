@@ -21,5 +21,8 @@
     <None Include="ExportMasters.ps1">
       <Filter>Source Files</Filter>
     </None>
+    <None Include="CombineSeasons.ps1">
+      <Filter>Source Files</Filter>
+    </None>
   </ItemGroup>
 </Project>

@@ -123,6 +123,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <None Include="CombineSeasons.ps1" />
     <None Include="CreateProject.ps1" />
     <None Include="ExportMasters.ps1" />
   </ItemGroup>

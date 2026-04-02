@@ -41,7 +41,7 @@ foreach ($cam in $meta.Cameras) {
         $expNum = [double]($expStr -replace 's', '')
 
         if ($name -match "masterFlat") {
-            $targetSub = "Master\flats\$telSetup\$sess $filt 0deg"
+            $targetSub = "Master\flats\$telSetup\$sess $filt"
             $newName = "masterFlat_BIN-1_${res}_FILTER-${filt}.xisf"
         }
         elseif ($name -match "masterDark") {

@@ -781,20 +781,25 @@ foreach($m in @("Master","Source")) {
 #>
 
 if ($pendingLinks.Count -gt 0) {
-    # Write-Host "`nPlanned symlink targets:" -ForegroundColor Cyan
-    foreach ($l in $pendingLinks) {
-        $target = Join-Path $sourcePath "$($l.Type)\$($l.Tag)"
-        if (Test-Path $target) {
-            # If symlink exists, check if it points to the same source
-            $existing = Get-Item $target -ErrorAction SilentlyContinue
-            if ($existing -and $existing.LinkType -eq 'SymbolicLink' -and $existing.Target -ne $l.Src) {
-                Write-Host "[!] Symlink $target already exists and points elsewhere!" -ForegroundColor Red
-            }
+    # --- Calculate total size for copy operation ---
+    $uniqueSourcePaths = $pendingLinks.Src | Select-Object -Unique
+    $totalSize = 0
+    foreach ($srcPath in $uniqueSourcePaths) {
+        if (Test-Path $srcPath) {
+            $totalSize += (Get-ChildItem $srcPath -Recurse -File | Measure-Object -Property Length -Sum).Sum
         }
-        # Write-Host "  -> $target  <= $($l.Src)"
     }
-    $createChoice = Read-Host "Create symlinks in [Source]? (Y/n)"
-    if ($createChoice -eq '' -or $createChoice -match '^[yYдД]') {
+    $totalSizeGB = [Math]::Round($totalSize / 1GB, 2)
+
+    # --- Ask user for action ---
+    Write-Host "`nCreate project structure in '$sourcePath'" -ForegroundColor Cyan
+    Write-Host " [1] Create symlinks (recommended, instant)" -ForegroundColor White
+    Write-Host " [2] Copy all source files ($totalSizeGB GB required)" -ForegroundColor White
+    
+    $choice = Read-Host "Select option (default is 1)"
+    if ($choice -eq '' -or $choice -eq '1') {
+        # --- ACTION 1: Create Symlinks ---
+        Write-Host "`nCreating symlinks..." -ForegroundColor Green
         foreach ($l in $pendingLinks) {
             $target = Join-Path $sourcePath "$($l.Type)\$($l.Tag)"
             if (!(Test-Path $target)) { 
@@ -802,7 +807,30 @@ if ($pendingLinks.Count -gt 0) {
                 New-Item -ItemType SymbolicLink -Path $target -Value $l.Src | Out-Null 
             }
         }
-        Write-Host "`n[DONE] Project Root: $setupRoot" -ForegroundColor Yellow
+        Write-Host "`n[DONE] Symlinks created. Project Root: $setupRoot" -ForegroundColor Yellow
+
+    } elseif ($choice -eq '2') {
+        # --- ACTION 2: Copy Files using Robocopy ---
+        Write-Host "`nCopying files... This may take a while." -ForegroundColor Green
+        $uniqueLinks = $pendingLinks | Sort-Object -Property Src -Unique
+
+        foreach ($l in $uniqueLinks) {
+            # We need to find all target tags that point to this unique source
+            $targetsForSrc = $pendingLinks | Where-Object { $_.Src -eq $l.Src }
+            
+            foreach ($targetEntry in $targetsForSrc) {
+                $targetPath = Join-Path $sourcePath "$($targetEntry.Type)\$($targetEntry.Tag)"
+                if (!(Test-Path $targetPath)) {
+                    New-Item -ItemType Directory -Path (Split-Path $targetPath) -Force | Out-Null
+                    Write-Host "Copying from $($l.Src) to $targetPath" -ForegroundColor DarkGray
+                    # Robocopy is multi-threaded by default (/MT) and more robust
+                    robocopy $l.Src $targetPath /E /MT /R:2 /W:5 | Out-Null
+                }
+            }
+        }
+        Write-Host "`n[DONE] Files copied. Project Root: $setupRoot" -ForegroundColor Yellow
+    } else {
+        Write-Host "`n[ABORTED] No action taken." -ForegroundColor Red
     }
 }
 

@@ -23,22 +23,45 @@ if (!(Test-Path $rootPath)) {
 Write-Host "`nScanning for season folders in: $rootPath" -ForegroundColor Yellow
 
 # Автоматически находим папки сезонов (содержащие папку Source), исключаем Combined
+$availableSeasons = @()
 $seasonFolders = @()
+
 Get-ChildItem $rootPath -Directory | ForEach-Object {
     if ($_.Name -eq "Combined") {
-        # Write-Host "  Skipping Combined folder" -ForegroundColor DarkGray
+        Write-Host "  Skipping Combined folder" -ForegroundColor DarkGray
         return
     }
     $sourcePath = Join-Path $_.FullName "Source"
     if (Test-Path $sourcePath) {
-        $seasonFolders += $sourcePath
+        $availableSeasons += @{
+            Name = $_.Name
+            Path = $sourcePath
+        }
         Write-Host "  Found season: $($_.Name)" -ForegroundColor Green
     }
 }
 
-if ($seasonFolders.Count -eq 0) {
+if ($availableSeasons.Count -eq 0) {
     Write-Host "[!] No season folders with Source subdirectories found!" -ForegroundColor Red
     Write-Host "    Expected structure: <RootPath>\<SeasonName>\Source\" -ForegroundColor Gray
+    exit
+}
+
+# Позволяем пользователю выбрать какие сезоны объединять
+Write-Host "`n--- SELECT SEASONS TO COMBINE ---" -ForegroundColor Cyan
+foreach ($season in $availableSeasons) {
+    $choice = Read-Host "Add season '$($season.Name)' to combine? (Y/n)"
+    if ($choice -eq '' -or $choice -match '^[yYдД]') {
+        $seasonFolders += $season.Path
+        Write-Host "  [v] Added: $($season.Name)" -ForegroundColor Green
+    } else {
+        Write-Host "  [x] Skipped: $($season.Name)" -ForegroundColor DarkGray
+    }
+}
+
+if ($seasonFolders.Count -eq 0) {
+    Write-Host "[!] No seasons selected for combining!" -ForegroundColor Red
+    Write-Host "    At least one season must be selected." -ForegroundColor Gray
     exit
 }
 

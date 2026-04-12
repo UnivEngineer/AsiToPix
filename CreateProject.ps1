@@ -11,18 +11,25 @@ $inputPath = (Read-Host "Paste path to lights folder (or any .fit file inside)")
 if ($inputPath -match '\.\w+$') { $inputPath = Split-Path $inputPath -Parent }
 
 # Parse the path for project metadata
-if ($inputPath -match 'ASIAir\\(?<obj>[^\\]+)\\(?<season>[^\\]+)\\(?<tel>.*?) @ (?<cam>ASI\d+[^\\]*)') {
+if ($inputPath -match 'ASIAir\\(?<obj>[^\\]+)\\(?<season>[^\\]+)\\(?<tel>.*?) @ (?<cam>ASI\d+[^\\]*)\\Good\\[^\\]+') {
     $parsedObj      = $Matches['obj']
     $parsedSeason   = $Matches['season']
     $parsedTel      = $Matches['tel']
     $parsedCamShort = $Matches['cam']
-} else { Write-Host "Path parse error! Expected: ...\ASIAir\<Object>\<Season>\<Scope> @ <Cam>\Good\<Filter>\<Date>" -ForegroundColor Red; exit }
+} else {
+    Write-Host "[ERROR] Path parse error!" -ForegroundColor Red
+    Write-Host "  Your path: $inputPath" -ForegroundColor Yellow
+    Write-Host "  Expected:  ...\ASIAir\<Object>\<Season>\<Scope> @ <Cam>\Good\<Filter>\<Date>" -ForegroundColor DarkGray
+    Write-Host "  Example:   Z:\AstroPhoto\ASIAir\M 3\Lake\LX200 @ 0.63x @ ASI2600\Good\L\26.04.09" -ForegroundColor DarkGray
+    Write-Host "  (Is the filter folder missing between 'Good' and the date folder?)" -ForegroundColor Red
+    exit 1
+}
 
 # ── Interactive parameter confirmation ───────────────────────────────────────
 function Confirm-Param {
     param([string]$Label, [string]$Detected)
     # Print label, arrow and detected value on one line, then prompt on same line
-    $labelPad = $Label.PadRight(6)
+    $labelPad = $Label.PadRight(7)
     $detPad = $Detected.PadRight(25)
     Write-Host "  $labelPad -> " -ForegroundColor DarkGray -NoNewline
     Write-Host $detPad -ForegroundColor Yellow -NoNewline
@@ -34,18 +41,24 @@ function Confirm-Param {
 Write-Host "`n-- Detected parameters -- (Enter to accept, or type override)" -ForegroundColor Cyan
 # Print each parameter label and detected value; Confirm-Param will prompt on same line
 Write-Host "" -NoNewline
-$astroObj = Confirm-Param "Object"  $parsedObj
-$season   = Confirm-Param "Season"  $parsedSeason
-$telSetup = Confirm-Param "Scope"   $parsedTel
-Write-Host ""
+
+$astroObj = Confirm-Param "Object" $parsedObj
+$season   = Confirm-Param "Season" $parsedSeason
+$telSetup = Confirm-Param "Scope"  $parsedTel
 
 # camShort = path segment from folder name (e.g. ASI2600, may lack MM/MC suffix)
 $camShort = $parsedCamShort
 
 # Structure
 $safeObj = $astroObj.Replace(" ", "_");
+
+# Project Path confirmation (default: next to script)
+$defaultProjectPath = Join-Path $PSScriptRoot $safeObj
+$projectPath = Confirm-Param "Project" $defaultProjectPath
+Write-Host ""
+
 $safeSetup = "$($season)_$($telSetup)_$($camShort)".Replace(" ", "_").Replace("@","").Replace("__","_")
-$setupRoot = Join-Path (Join-Path $localBase $safeObj) $safeSetup
+$setupRoot = Join-Path $projectPath $safeSetup
 $sourcePath = Join-Path $setupRoot "Source"; $pixPath = Join-Path $setupRoot "Pix"
 
 if (Test-Path $sourcePath) {

@@ -863,6 +863,7 @@ Write-Host "If you see KEYWORD CONFLICT warnings above:" -ForegroundColor Gray
 Write-Host "- WBPP may prioritize filename keywords over your custom FILTER keywords" -ForegroundColor Yellow
 Write-Host "- This can cause calibration frame mismatches (e.g., Ha flats not matching H lights)" -ForegroundColor Yellow
 Write-Host "- Consider renaming conflicting files to use normalized filter names (Ha->H, OIII->O, SII->S)" -ForegroundColor Yellow
+Write-Host "- Consider removing conflicting keywords from calibration file (FILTER, GAIN etc)" -ForegroundColor Yellow
 Write-Host "- Alternative: Use WBPP's 'Smart naming override' option and clear/reload file list" -ForegroundColor Gray
 
 # --- После завершения сканирования и построения camMap ---

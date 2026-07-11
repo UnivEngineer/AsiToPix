@@ -41,6 +41,10 @@ fsutil behavior set SymlinkEvaluation L2R:1
 fsutil behavior set SymlinkEvaluation R2L:1
 fsutil behavior set SymlinkEvaluation R2R:1
 fsutil behavior query SymlinkEvaluation
+echo.
+echo Note: symlink evaluation lets Windows follow existing links.
+echo       Creating new symlinks still requires an elevated shell or Windows Developer Mode.
+echo       Developer Mode: Settings ^> System ^> For developers ^> Developer Mode.
 
 echo.
 echo Enabling long path support...

@@ -48,6 +48,156 @@ function Resolve-CreateProjectFullPath {
     return [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path))
 }
 
+function Resolve-CreateProjectPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProcessingRoot
+    )
+
+    $trimmedPath = $ProjectPath.Trim().Trim('"')
+    if ([string]::IsNullOrWhiteSpace($trimmedPath)) {
+        throw "Project path cannot be empty."
+    }
+
+    $isAbsolutePath = $trimmedPath -match '^[A-Za-z]:[\\/]' -or
+        $trimmedPath -match '^[\\/]{2}' -or
+        $trimmedPath -match '^[\\/]'
+
+    if ($isAbsolutePath) {
+        return Resolve-CreateProjectFullPath -Path $trimmedPath
+    }
+
+    $projectPathUnderProcessing = Join-Path -Path $ProcessingRoot -ChildPath $trimmedPath
+    $resolvedProjectPath = Resolve-CreateProjectFullPath -Path $projectPathUnderProcessing
+    if (-not (Test-CreateProjectPathInside -ChildPath $resolvedProjectPath -ParentPath $ProcessingRoot)) {
+        throw "Relative project path must stay inside Processing. Input: $ProjectPath; Processing root: $ProcessingRoot"
+    }
+
+    return $resolvedProjectPath
+}
+
+function ConvertTo-CreateProjectNameToken {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $normalized = $Name.ToLowerInvariant()
+    $normalized = $normalized -replace '\b(nebula|galaxy|cluster|region|the)\b', ' '
+    $normalized = $normalized -replace '[^a-z0-9]+', ' '
+
+    return @($normalized.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries) | Select-Object -Unique)
+}
+
+function Get-CreateProjectNameMatch {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DetectedName,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$Candidates
+    )
+
+    if ([string]::IsNullOrWhiteSpace($DetectedName) -or $Candidates.Count -eq 0) {
+        return @()
+    }
+
+    $detected = $DetectedName.Trim()
+    $detectedLower = $detected.ToLowerInvariant()
+    $detectedCompact = $detectedLower -replace '[^a-z0-9]+', ''
+    $detectedTokens = @(ConvertTo-CreateProjectNameToken -Name $detected)
+
+    $nameMatches = foreach ($candidate in $Candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+
+        $candidateLower = $candidate.ToLowerInvariant()
+        $candidateCompact = $candidateLower -replace '[^a-z0-9]+', ''
+        $candidateTokens = @(ConvertTo-CreateProjectNameToken -Name $candidate)
+        $score = 0
+
+        if ($candidateLower -eq $detectedLower) {
+            $score += 1000
+        }
+
+        if ($candidateLower.Contains($detectedLower) -or $detectedLower.Contains($candidateLower)) {
+            $score += 200
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($detectedCompact) -and
+            ($candidateCompact.Contains($detectedCompact) -or $detectedCompact.Contains($candidateCompact))) {
+            $score += 160
+        }
+
+        $sharedTokens = @($detectedTokens | Where-Object { $candidateTokens -contains $_ })
+        if ($sharedTokens.Count -gt 0) {
+            $score += 40 * $sharedTokens.Count
+            if ($sharedTokens.Count -eq $detectedTokens.Count) {
+                $score += 80
+            }
+        }
+
+        if ($score -gt 0) {
+            [PSCustomObject]@{
+                Name  = $candidate
+                Score = $score
+            }
+        }
+    }
+
+    return @($nameMatches | Sort-Object -Property @{ Expression = "Score"; Descending = $true }, Name)
+}
+
+function Resolve-CreateProjectDefaultProjectPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DetectedObjectName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProcessingRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SafeObjectName
+    )
+
+    $fallbackPath = Join-Path -Path $ProcessingRoot -ChildPath $SafeObjectName
+    if (-not (Test-Path -LiteralPath $ProcessingRoot -PathType Container)) {
+        return [PSCustomObject]@{
+            Path        = $fallbackPath
+            MatchedName = $null
+            Score       = 0
+        }
+    }
+
+    $existingProjectNames = @(Get-ChildItem -LiteralPath $ProcessingRoot -Directory -ErrorAction Stop |
+        Select-Object -ExpandProperty Name)
+    $projectMatches = @(Get-CreateProjectNameMatch -DetectedName $DetectedObjectName -Candidates $existingProjectNames)
+    if ($projectMatches.Count -eq 0 -or $projectMatches[0].Score -lt 160) {
+        return [PSCustomObject]@{
+            Path        = $fallbackPath
+            MatchedName = $null
+            Score       = 0
+        }
+    }
+
+    if ($projectMatches.Count -gt 1 -and $projectMatches[0].Score -eq $projectMatches[1].Score) {
+        return [PSCustomObject]@{
+            Path        = $fallbackPath
+            MatchedName = $null
+            Score       = 0
+        }
+    }
+
+    return [PSCustomObject]@{
+        Path        = Join-Path -Path $ProcessingRoot -ChildPath $projectMatches[0].Name
+        MatchedName = $projectMatches[0].Name
+        Score       = $projectMatches[0].Score
+    }
+}
+
 function Test-CreateProjectPathInside {
     param(
         [Parameter(Mandatory = $true)]
@@ -146,7 +296,53 @@ function New-CreateProjectSymbolicLink {
     $parentPath = Split-Path -Path $Path -Parent
     New-CreateProjectDirectory -Path $parentPath
     if ($script:PSCmdlet.ShouldProcess($Path, "Create symbolic link to '$Target'")) {
-        New-Item -ItemType SymbolicLink -Path $Path -Value $Target -ErrorAction Stop | Out-Null
+        try {
+            New-Item -ItemType SymbolicLink -Path $Path -Value $Target -ErrorAction Stop | Out-Null
+        } catch [System.UnauthorizedAccessException] {
+            throw "Cannot create symbolic link: $Path. Windows requires Administrator rights or Developer Mode for symlink creation. Init.cmd enables symlink evaluation only; it does not grant symlink creation rights."
+        }
+    }
+}
+
+function Write-CreateProjectSymlinkPermissionHelp {
+    Write-Host "`n[!] Windows refused symbolic link creation." -ForegroundColor Yellow
+    Write-Host "    Init.cmd enables symlink evaluation only; it does not grant symlink creation rights." -ForegroundColor Gray
+    Write-Host "`n    Choose one of these options, then run CreateProject.ps1 again:" -ForegroundColor Cyan
+    Write-Host "      1. Run PowerShell or Windows Terminal as Administrator." -ForegroundColor White
+    Write-Host "      2. Enable Windows Developer Mode:" -ForegroundColor White
+    Write-Host "         Settings -> System -> For developers -> Developer Mode -> On" -ForegroundColor White
+    Write-Host "`n    Copy mode is intentionally not offered as an automatic fallback because source data can be terabytes." -ForegroundColor Gray
+}
+
+function Test-CreateProjectSymbolicLinkCreation {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ScratchRoot
+    )
+
+    if ($WhatIfPreference) {
+        return $true
+    }
+
+    $testRoot = Join-Path -Path $ScratchRoot -ChildPath ".asitopix_symlink_test_$([guid]::NewGuid().ToString('N'))"
+    $testSource = Join-Path -Path $testRoot -ChildPath "source"
+    $testLink = Join-Path -Path $testRoot -ChildPath "link"
+
+    try {
+        New-Item -ItemType Directory -Path $testSource -Force -ErrorAction Stop | Out-Null
+        New-Item -ItemType SymbolicLink -Path $testLink -Value $testSource -ErrorAction Stop | Out-Null
+        return $true
+    } catch [System.UnauthorizedAccessException] {
+        Write-CreateProjectSymlinkPermissionHelp
+        return $false
+    } catch {
+        Write-Host "`n[!] Symbolic link preflight failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    } finally {
+        if ((Test-Path -LiteralPath $testRoot) -and
+            (Test-CreateProjectPathInside -ChildPath $testRoot -ParentPath $ScratchRoot)) {
+            Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -229,9 +425,21 @@ $camShort = $parsedCamShort
 # Structure
 $safeObj = $astroObj.Replace(" ", "_");
 
-# Project Path confirmation (default: next to script)
-$defaultProjectPath = Join-Path $PSScriptRoot $safeObj
-$projectPath = Confirm-Param "Project" $defaultProjectPath
+# Project Path confirmation
+$processingRoot = Join-Path -Path $baseZ -ChildPath "Processing"
+$defaultProjectMatch = Resolve-CreateProjectDefaultProjectPath `
+    -DetectedObjectName $astroObj `
+    -ProcessingRoot $processingRoot `
+    -SafeObjectName $safeObj
+$defaultProjectPath = $defaultProjectMatch.Path
+if (-not [string]::IsNullOrWhiteSpace($defaultProjectMatch.MatchedName)) {
+    Write-Host "  Existing project match: $($defaultProjectMatch.MatchedName)" -ForegroundColor DarkGray
+}
+$projectPathInput = Confirm-Param "Project" $defaultProjectPath
+$projectPath = Resolve-CreateProjectPath -ProjectPath $projectPathInput -ProcessingRoot $processingRoot
+if ($projectPath -ne $projectPathInput) {
+    Write-Host "  Project path resolved to: $projectPath" -ForegroundColor DarkGray
+}
 Write-Host ""
 
 $safeSetup = "$($season)_$($telSetup)_$($camShort)".Replace(" ", "_").Replace("@","").Replace("__","_")
@@ -1017,17 +1225,28 @@ if ($pendingLinks.Count -gt 0) {
     Write-Host " [2] Copy all source files ($totalSizeGB GB required)" -ForegroundColor White
     
     $choice = Read-Host "Select option (default is 1)"
+    $copyFiles = $false
     if ($choice -eq '' -or $choice -eq '1') {
         # --- ACTION 1: Create Symlinks ---
-        Write-Host "`nCreating symlinks..." -ForegroundColor Green
-        foreach ($l in $pendingLinks) {
-            $targetTypePath = Join-Path -Path $sourcePath -ChildPath $l.Type
-            $target = Join-Path -Path $targetTypePath -ChildPath $l.Tag
-            New-CreateProjectSymbolicLink -Path $target -Target $l.Src
+        if (Test-CreateProjectSymbolicLinkCreation -ScratchRoot $sourcePath) {
+            Write-Host "`nCreating symlinks..." -ForegroundColor Green
+            foreach ($l in $pendingLinks) {
+                $targetTypePath = Join-Path -Path $sourcePath -ChildPath $l.Type
+                $target = Join-Path -Path $targetTypePath -ChildPath $l.Tag
+                New-CreateProjectSymbolicLink -Path $target -Target $l.Src
+            }
+            Write-Host "`n[DONE] Symlinks created. Project Root: $setupRoot" -ForegroundColor Yellow
+        } else {
+            Write-Host "`n[ABORTED] Symlinks were not created." -ForegroundColor Red
         }
-        Write-Host "`n[DONE] Symlinks created. Project Root: $setupRoot" -ForegroundColor Yellow
 
     } elseif ($choice -eq '2') {
+        $copyFiles = $true
+    } else {
+        Write-Host "`n[ABORTED] No action taken." -ForegroundColor Red
+    }
+
+    if ($copyFiles) {
         # --- ACTION 2: Copy Files using Robocopy ---
         Write-Host "`nCopying files... This may take a while." -ForegroundColor Green
         $uniqueLinks = $pendingLinks | Sort-Object -Property Src -Unique
@@ -1044,8 +1263,6 @@ if ($pendingLinks.Count -gt 0) {
             }
         }
         Write-Host "`n[DONE] Files copied. Project Root: $setupRoot" -ForegroundColor Yellow
-    } else {
-        Write-Host "`n[ABORTED] No action taken." -ForegroundColor Red
     }
 }
 

@@ -1,8 +1,185 @@
-# Run as Admin for Symlinks
-fsutil behavior set SymlinkEvaluation L2R:1 | Out-Null
-$baseZ = "Z:\AstroPhoto"; $localBase = "D:\Astro"
+﻿# Run as Admin for Symlinks
+[CmdletBinding(SupportsShouldProcess = $true)]
+param()
 
-Write-Host "--- ASIAir SMART SCANNER v28 ---" -ForegroundColor Cyan
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$environmentModule = Join-Path $PSScriptRoot "src\AsiToPix.Environment.psm1"
+Import-Module $environmentModule -Force
+Initialize-AsiToPixEnvironment
+
+$pathsModule = Join-Path $PSScriptRoot "src\AsiToPix.Paths.psm1"
+Import-Module $pathsModule -Force
+
+function Read-CreateProjectConfirmation {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Prompt,
+
+        [bool]$DefaultYes = $true
+    )
+
+    $suffix = if ($DefaultYes) { "(Y/n)" } else { "(y/N)" }
+    do {
+        $answer = (Read-Host "$Prompt $suffix").Trim()
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            return $DefaultYes
+        }
+
+        $firstChar = $answer[0]
+        if ($firstChar -in @([char]'y', [char]'Y', [char]0x0434, [char]0x0414)) { return $true }
+        if ($firstChar -in @([char]'n', [char]'N', [char]0x043d, [char]0x041d)) { return $false }
+
+        Write-Host "[!] Enter Y/N or the Cyrillic yes/no initials." -ForegroundColor Red
+    } while ($true)
+}
+
+function Resolve-CreateProjectFullPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (Test-Path -LiteralPath $Path) {
+        return (Resolve-Path -LiteralPath $Path).ProviderPath
+    }
+
+    return [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path))
+}
+
+function Test-CreateProjectPathInside {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ChildPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ParentPath
+    )
+
+    $childFull = Resolve-CreateProjectFullPath -Path $ChildPath
+    $parentFull = Resolve-CreateProjectFullPath -Path $ParentPath
+    $separator = [System.IO.Path]::DirectorySeparatorChar
+    $parentWithSeparator = if ($parentFull.EndsWith($separator)) {
+        $parentFull
+    } else {
+        $parentFull + $separator
+    }
+
+    return $childFull.Equals($parentFull, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $childFull.StartsWith($parentWithSeparator, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function New-CreateProjectDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        return
+    }
+
+    if (Test-Path -LiteralPath $Path) {
+        throw "Cannot create directory because a non-directory item already exists: $Path"
+    }
+
+    if ($script:PSCmdlet.ShouldProcess($Path, "Create directory")) {
+        New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
+    }
+}
+
+function Remove-CreateProjectSourceDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SetupRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $SourcePath)) {
+        return
+    }
+
+    $sourceItem = Get-Item -LiteralPath $SourcePath -Force
+    if (-not $sourceItem.PSIsContainer -or $sourceItem.LinkType -eq 'SymbolicLink') {
+        throw "Refusing to clean Source because it is not an ordinary directory: $SourcePath"
+    }
+
+    if ($sourceItem.Name -ne "Source") {
+        throw "Refusing to clean a directory that is not named Source: $SourcePath"
+    }
+
+    if (-not (Test-CreateProjectPathInside -ChildPath $SourcePath -ParentPath $SetupRoot)) {
+        throw "Refusing to clean Source outside the expected project root. Source: $SourcePath; Project root: $SetupRoot"
+    }
+
+    if ($script:PSCmdlet.ShouldProcess($SourcePath, "Remove existing project Source directory")) {
+        Remove-Item -LiteralPath $SourcePath -Recurse -Force -ErrorAction Stop
+    }
+}
+
+function New-CreateProjectSymbolicLink {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Target
+    )
+
+    if (Test-Path -LiteralPath $Path) {
+        $existingItem = Get-Item -LiteralPath $Path -Force
+        if ($existingItem.LinkType -ne 'SymbolicLink') {
+            throw "Cannot create symbolic link because an ordinary item already exists: $Path"
+        }
+
+        $existingTarget = @($existingItem.Target)[0]
+        if ($existingTarget -eq $Target) {
+            return
+        }
+
+        throw "Symbolic link already exists with a different target. Path: $Path; Existing target: $existingTarget; New target: $Target"
+    }
+
+    $parentPath = Split-Path -Path $Path -Parent
+    New-CreateProjectDirectory -Path $parentPath
+    if ($script:PSCmdlet.ShouldProcess($Path, "Create symbolic link to '$Target'")) {
+        New-Item -ItemType SymbolicLink -Path $Path -Value $Target -ErrorAction Stop | Out-Null
+    }
+}
+
+function Copy-CreateProjectDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Source,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Destination
+    )
+
+    if (Test-Path -LiteralPath $Destination) {
+        $destinationItem = Get-Item -LiteralPath $Destination -Force
+        if (-not $destinationItem.PSIsContainer -or $destinationItem.LinkType -eq 'SymbolicLink') {
+            throw "Cannot copy files because the destination already exists and is not an ordinary directory: $Destination"
+        }
+
+        return
+    }
+
+    New-CreateProjectDirectory -Path $Destination
+    if ($script:PSCmdlet.ShouldProcess($Destination, "Copy files from '$Source'")) {
+        & robocopy $Source $Destination /E /MT /R:2 /W:5 | Out-Null
+        if ($LASTEXITCODE -gt 7) {
+            throw "Robocopy failed with exit code $LASTEXITCODE while copying '$Source' to '$Destination'."
+        }
+    }
+}
+
+Write-Host "--- ASIAir SMART SCANNER v29 ---" -ForegroundColor Cyan
+
+$baseZ = Resolve-AstroPhotoRoot
 
 # 1. AUTO-DETECT
 $inputPath = (Read-Host "Paste path to lights folder (or any .fit file inside)").Trim('"')
@@ -20,7 +197,7 @@ if ($inputPath -match 'ASIAir\\(?<obj>[^\\]+)\\(?<season>[^\\]+)\\(?<tel>.*?) @ 
     Write-Host "[ERROR] Path parse error!" -ForegroundColor Red
     Write-Host "  Your path: $inputPath" -ForegroundColor Yellow
     Write-Host "  Expected:  ...\ASIAir\<Object>\<Season>\<Scope> @ <Cam>\Good\<Filter>\<Date>" -ForegroundColor DarkGray
-    Write-Host "  Example:   Z:\AstroPhoto\ASIAir\M 3\Lake\LX200 @ 0.63x @ ASI2600\Good\L\26.04.09" -ForegroundColor DarkGray
+    Write-Host "  Example:   <AstroPhotoRoot>\ASIAir\M 3\Lake\LX200 @ 0.63x @ ASI2600\Good\L\26.04.09" -ForegroundColor DarkGray
     Write-Host "  (Is the filter folder missing between 'Good' and the date folder?)" -ForegroundColor Red
     exit 1
 }
@@ -59,19 +236,29 @@ Write-Host ""
 
 $safeSetup = "$($season)_$($telSetup)_$($camShort)".Replace(" ", "_").Replace("@","").Replace("__","_")
 $setupRoot = Join-Path $projectPath $safeSetup
-$sourcePath = Join-Path $setupRoot "Source"; $pixPath = Join-Path $setupRoot "Pix"
+$sourcePath = Join-Path -Path $setupRoot -ChildPath "Source"
+$pixPath = Join-Path -Path $setupRoot -ChildPath "Pix"
 
-if (Test-Path $sourcePath) {
-    $cleanChoice = Read-Host "Clean [Source] folder? (Y/n)"
-    if ($cleanChoice -eq '' -or $cleanChoice -match '^[yYдД]') { Remove-Item $sourcePath -Recurse -Force }
+if (Test-Path -LiteralPath $sourcePath) {
+    if (Read-CreateProjectConfirmation -Prompt "Clean [Source] folder?") {
+        Remove-CreateProjectSourceDirectory -SourcePath $sourcePath -SetupRoot $setupRoot
+    }
 }
-foreach ($p in @($sourcePath, $pixPath)) { if (!(Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null } }
+foreach ($p in @($sourcePath, $pixPath)) {
+    New-CreateProjectDirectory -Path $p
+}
 
 Write-Host ""
-$mergeChoice = Read-Host "Allow WBPP to merge sessions with filters None, IRC and Trib into a single one L? (Y/n)"
-$mergeFilters = ($mergeChoice -eq '' -or $mergeChoice -match '^[yYдД]')
+$mergeFilters = Read-CreateProjectConfirmation -Prompt "Allow WBPP to merge sessions with filters None, IRC and Trib into a single one L?"
 
-$lightsRoot = "$baseZ\ASIAir\$astroObj\$season\$telSetup @ $camShort\Good"
+$asiairRoot = Join-Path -Path $baseZ -ChildPath "ASIAir"
+$objectRoot = Join-Path -Path $asiairRoot -ChildPath $astroObj
+$seasonRoot = Join-Path -Path $objectRoot -ChildPath $season
+$setupSourceRoot = Join-Path -Path $seasonRoot -ChildPath "$telSetup @ $camShort"
+$lightsRoot = Join-Path -Path $setupSourceRoot -ChildPath "Good"
+if (-not (Test-Path -LiteralPath $lightsRoot -PathType Container)) {
+    throw "Lights root not found: $lightsRoot"
+}
 $pendingLinks = @()
  # Camera mapping summary: collect observed raw filters, sanitized filters and targets per camera
  $camMap = @{}
@@ -113,20 +300,20 @@ function Get-CalibPath($type, $gain, $rawTemp, $expValue, $cb) {
     $targetTempFolder = "$([Math]::Round($numTemp / 5.0) * 5)C"
     
     foreach ($m in @("Master", "Source")) {
-        $base = "$cb\$m\$sub\Gain$gain\$targetTempFolder"
-        if (Test-Path $base) {
+        $base = Join-Path -Path $cb -ChildPath "$m\$sub\Gain$gain\$targetTempFolder"
+        if (Test-Path -LiteralPath $base -PathType Container) {
             $finalPath = $base
             if ($expValue) {
                 $cleanExp = ($expValue -replace '[^0-9\.]', '').Replace(".0","")
                 # Improved exposure folder matching - exact match first, then prefix match
-                $expDir = Get-ChildItem $base -Directory | Where-Object { 
+                $expDir = Get-ChildItem -LiteralPath $base -Directory -ErrorAction Stop | Where-Object {
                     $folderExp = ($_.Name -replace '[^0-9\.]', '').Replace(".0","")
                     $folderExp -eq $cleanExp 
                 } | Select-Object -First 1
                 
                 # If no exact match found, try prefix match (for backwards compatibility)
                 if (-not $expDir) {
-                    $expDir = Get-ChildItem $base -Directory | Where-Object { 
+                    $expDir = Get-ChildItem -LiteralPath $base -Directory -ErrorAction Stop | Where-Object {
                         $_.Name -like "$cleanExp*" 
                     } | Sort-Object Name | Select-Object -First 1
                 }
@@ -147,15 +334,17 @@ function AngleDiff180($a, $b) {
 }
 
 # SCANNER - iterates filter-group folders (L, RGB, Ha...) then date sub-folders
-foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
-    foreach ($dFolder in (Get-ChildItem $fFolder.FullName -Directory)) {
+foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAction Stop)) {
+    foreach ($dFolder in (Get-ChildItem -LiteralPath $fFolder.FullName -Directory -ErrorAction Stop)) {
         $sessionDate = ($dFolder.Name -split ' ')[0]
-        # DEBUG: выводим путь и имя папки-даты
+        # DEBUG: print the path and date folder name
         # Write-Host "[DEBUG] Processing session folder: $($dFolder.FullName) | date var: $sessionDate" -ForegroundColor DarkGray
-        $fitsFiles = Get-ChildItem $dFolder.FullName -Filter "*.fit*"
+        $fitsFiles = Get-ChildItem -LiteralPath $dFolder.FullName -Filter "*.fit*" -ErrorAction Stop
         if (!$fitsFiles) { continue }
         $sample = $fitsFiles | Select-Object -First 1
         $fName = $sample.Name
+        $fFound = $null
+        $foundIn = $null
 
         # 1. DETECT CAMERA FROM THIS SESSION'S FITS FILENAME
         $sessionCamFull = $camShort   # fallback to path-level short name
@@ -163,7 +352,8 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
             $sessionCamFull = ("ASI" + $Matches['camf']) -replace '^ASIASI','ASI'
         }
         $sessionCamType  = if ($sessionCamFull -match "MM") { "Mono" } else { "OSC" }
-        $sessionCalibBase = "$baseZ\Calibration\$sessionCamFull"
+        $sessionCalibRoot = Join-Path -Path $baseZ -ChildPath "Calibration"
+        $sessionCalibBase = Join-Path -Path $sessionCalibRoot -ChildPath $sessionCamFull
         $camInFile = $sessionCamFull -replace '^ASI',''
 
         if (-not $camMap.ContainsKey($sessionCamFull)) {
@@ -246,6 +436,10 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
 
         # --- Robust filter match: look for filter as separate word or after date ---
         function FlatFolderMatchesFilter($folderName, $aliases) {
+            if ([string]::IsNullOrWhiteSpace($folderName) -or $folderName.Length -lt 8) {
+                return $false
+            }
+
             $datePart = $folderName.Substring(0,8)
             $rest = $folderName.Substring(8).TrimStart()
             $filtPart = $null
@@ -285,29 +479,34 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
         $avail = @()
         # Write-Host "[DEBUG] Scanning flat folders in: $sessionCalibBase\*\flats\$telSetup" -ForegroundColor Cyan
         foreach($m in @("Master","Source")) {
-            $p = "$sessionCalibBase\$m\flats\$telSetup"
-            if (Test-Path $p) {
-                Get-ChildItem $p -Directory | ForEach-Object {
+            $p = Join-Path -Path $sessionCalibBase -ChildPath "$m\flats\$telSetup"
+            if (Test-Path -LiteralPath $p -PathType Container) {
+                Get-ChildItem -LiteralPath $p -Directory -ErrorAction Stop | ForEach-Object {
                     $item = $_ | Select-Object -Property Name, FullName
                     $folderName = $item.Name
-                    $date = $folderName.Substring(0,8)
-                    $rest = $folderName.Substring(8).TrimStart()
                     $flatFilt = $null; $ang = $null; $warn = $false
-                    if ($rest -match '^(filt)?([^ _]+)') { $flatFilt = $Matches[2] }
-                    else { $warn = $true; Write-Host "[!] Flat folder '$folderName' does not match expected pattern (date filt<Filter> or date <Filter>)" -ForegroundColor Red }
-                    # Validate date
-                    $dateOk = $false
-                    $d = ParseDate $date
-                    if ($d) { $dateOk = $true } else { $dateOk = $false }
-                    if (-not $dateOk) { $warn = $true; Write-Host "[!] Invalid date in flat folder: $folderName" -ForegroundColor Red }
-                    # Validate filter
-                    if ($flatFilt -and ($knownFilters -notcontains $flatFilt)) { $warn = $true; Write-Host "[!] Unknown filter '$flatFilt' in flat folder: $folderName" -ForegroundColor Red }
-                    # Validate angle if present (optional)
-                    if ($folderName -match '(\d+)deg') { $ang = $Matches[1] } else { $ang = $null }
-                    if ($ang -and ($ang -notmatch '^\d+$')) { $warn = $true; Write-Host "[!] Invalid angle in flat folder: $folderName" -ForegroundColor Red }
-                    # Write-Host "[DEBUG] Found flat folder: $folderName | Filter: $flatFilt | Date: $date | Angle: $ang" -ForegroundColor Magenta
-                    $obj = [PSCustomObject]@{ Name = $item.Name; FullName = $item.FullName; Origin = $m }
-                    $avail += $obj
+                    if ($folderName.Length -lt 8) {
+                        $warn = $true
+                        Write-Host "[!] Flat folder '$folderName' is too short to contain a yy.MM.dd date prefix" -ForegroundColor Red
+                    } else {
+                        $date = $folderName.Substring(0,8)
+                        $rest = $folderName.Substring(8).TrimStart()
+                        if ($rest -match '^(filt)?([^ _]+)') { $flatFilt = $Matches[2] }
+                        else { $warn = $true; Write-Host "[!] Flat folder '$folderName' does not match expected pattern (date filt<Filter> or date <Filter>)" -ForegroundColor Red }
+                        # Validate date
+                        $dateOk = $false
+                        $d = ParseDate $date
+                        if ($d) { $dateOk = $true } else { $dateOk = $false }
+                        if (-not $dateOk) { $warn = $true; Write-Host "[!] Invalid date in flat folder: $folderName" -ForegroundColor Red }
+                        # Validate filter
+                        if ($flatFilt -and ($knownFilters -notcontains $flatFilt)) { $warn = $true; Write-Host "[!] Unknown filter '$flatFilt' in flat folder: $folderName" -ForegroundColor Red }
+                        # Validate angle if present (optional)
+                        if ($folderName -match '(\d+)deg') { $ang = $Matches[1] } else { $ang = $null }
+                        if ($ang -and ($ang -notmatch '^\d+$')) { $warn = $true; Write-Host "[!] Invalid angle in flat folder: $folderName" -ForegroundColor Red }
+                        # Write-Host "[DEBUG] Found flat folder: $folderName | Filter: $flatFilt | Date: $date | Angle: $ang" -ForegroundColor Magenta
+                        $obj = [PSCustomObject]@{ Name = $item.Name; FullName = $item.FullName; Origin = $m }
+                        $avail += $obj
+                    }
                 }
             }
         }
@@ -386,17 +585,17 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                     # Note: Blue coloring for smart matches will be determined later in the display loop
                 }
             }
-            # Приоритет выбора по умолчанию с исправленной логикой:
-            # 1. Master среди зелёных (точное совпадение даты+угла)
-            # 2. Любой зелёный (точное совпадение даты+угла)  
-            # 3. Master среди жёлтых с совпадением ПО ДАТЕ (приоритет даты над углом)
-            # 4. Любой жёлтый с совпадением ПО ДАТЕ  
-            # 5. Master среди синих - ближайший в прошлом
-            # 6. Любой синий - ближайший в прошлом
-            # 7. Master среди синих - ближайший в будущем (1-2 дня)
-            # 8. Любой синий - ближайший в будущем (1-2 дня)
-            # 9. Master среди жёлтых с совпадением ПО УГЛУ (углы в последнюю очередь)
-            # 10. Любой жёлтый с совпадением ПО УГЛУ
+            # Default selection priority with the corrected logic:
+            # 1. Master among green matches (exact date+angle match)
+            # 2. Any green match (exact date+angle match)
+            # 3. Master among yellow DATE matches (date has priority over angle)
+            # 4. Any yellow DATE match
+            # 5. Master among blue matches: closest past date
+            # 6. Any blue match: closest past date
+            # 7. Master among blue matches: closest future date (1-2 days)
+            # 8. Any blue match: closest future date (1-2 days)
+            # 9. Master among yellow ANGLE matches (angles have lowest priority)
+            # 10. Any yellow ANGLE match
             $masterYellowDateIdx = -1
             $yellowDateIdx = -1
             $masterYellowAngleIdx = -1
@@ -409,7 +608,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
             $closestPastDays = 9999
             $closestFutureDays = 9999
             
-            # Собираем индексы по приоритетам с поиском ближайших дат
+            # Collect priority indices while searching for the nearest dates
             for ($i=0; $i -lt $avail.Count; $i++) {
                 if (-not $avail[$i].FiltOk) { continue }
                 
@@ -431,22 +630,22 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 $dateInPast = ($candDate -and $sessDateObj -and $candDate -lt $sessDateObj)
                 $dateInNearFuture = ($candDate -and $sessDateObj -and $candDate -gt $sessDateObj -and $dateDiff -le 2)
                 
-                # Классификация по типам совпадений с приоритетом даты
+                # Classify match types with date-first priority
                 if ($dateMatch -and $angMatch) {
-                    # Зелёные (уже обработаны выше в первом цикле)
+                    # Green matches were already handled in the first pass
                 } elseif ($dateMatch -or $dateNear) {
-                    # Жёлтые по ДАТЕ - высший приоритет среди жёлтых
+                    # Yellow DATE matches have the highest priority among yellow matches
                     if ($yellowDateIdx -eq -1) { $yellowDateIdx = $i }
                     if ($avail[$i].Origin -eq 'Master' -and $masterYellowDateIdx -eq -1) { $masterYellowDateIdx = $i }
                 } elseif ($dateInPast) {
-                    # Синие в прошлом - ищем ближайший (самый свежий), менее строго фильтруем по углам
+                    # Blue past matches: prefer the nearest/newest date and filter angles less strictly
                     $pastAngleConflict = ($numCurAng -ne -999 -and $fAng -ne -888 -and (AngleDiff180 $numCurAng $fAng) -gt 30)
                     if (-not $pastAngleConflict -and $dateDiff -lt $closestPastDays) {
                         $closestPastDays = $dateDiff
                         $closestPastIdx = $i
                         if ($avail[$i].Origin -eq 'Master') { $masterClosestPastIdx = $i }
                     } elseif (-not $pastAngleConflict -and $dateDiff -eq $closestPastDays) {
-                        # Если дата та же, предпочитаем совпадающий угол
+                        # If the date is the same, prefer a matching angle
                         if ($angMatch -and -not ($numCurAng -ne -999 -and $avail[$closestPastIdx].Ang -ne -888 -and (AngleDiff180 $numCurAng $avail[$closestPastIdx].Ang) -le 2)) {
                             $closestPastIdx = $i
                         }
@@ -459,14 +658,14 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                         }
                     }
                 } elseif ($dateInNearFuture) {
-                    # Синие в ближайшем будущем - ищем ближайший, НО отклоняем несовместимые углы
+                    # Blue near-future matches: prefer the nearest date, but reject incompatible angles
                     $futureAngleConflict = ($numCurAng -ne -999 -and $fAng -ne -888 -and (AngleDiff180 $numCurAng $fAng) -gt 10)
                     if (-not $futureAngleConflict -and $dateDiff -lt $closestFutureDays) {
                         $closestFutureDays = $dateDiff
                         $closestFutureIdx = $i
                         if ($avail[$i].Origin -eq 'Master') { $masterClosestFutureIdx = $i }
                     } elseif (-not $futureAngleConflict -and $dateDiff -eq $closestFutureDays) {
-                        # Если дата та же, предпочитаем совпадающий угол
+                        # If the date is the same, prefer a matching angle
                         if ($angMatch -and -not ($numCurAng -ne -999 -and $avail[$closestFutureIdx].Ang -ne -888 -and (AngleDiff180 $numCurAng $avail[$closestFutureIdx].Ang) -le 2)) {
                             $closestFutureIdx = $i
                         }
@@ -479,13 +678,13 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                         }
                     }
                 } elseif ($angMatch) {
-                    # Жёлтые по УГЛУ - низший приоритет среди жёлтых
+                    # Yellow ANGLE matches have the lowest priority among yellow matches
                     if ($yellowAngleIdx -eq -1) { $yellowAngleIdx = $i }
                     if ($avail[$i].Origin -eq 'Master' -and $masterYellowAngleIdx -eq -1) { $masterYellowAngleIdx = $i }
                 }
             }
             
-            # Выбираем дефолтный индекс: ДАТА - основной критерий, УГОЛ - уточняющий
+            # Pick the default index: DATE is the main criterion, ANGLE refines it
             if ($masterGreenIdx -ge 0) { $defaultIdx = $masterGreenIdx }
             elseif ($fullGreenIdx -ge 0) { $defaultIdx = $fullGreenIdx }
             elseif ($masterYellowDateIdx -ge 0) { $defaultIdx = $masterYellowDateIdx }
@@ -498,7 +697,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
             elseif ($yellowAngleIdx -ge 0) { $defaultIdx = $yellowAngleIdx }
             else { $defaultIdx = -1 }
 
-            # Выводим оба подходящих угла для подсказки
+            # Show both equivalent angles as a hint
             Write-Host "Select flats from calibration root: $sessionCalibBase" -ForegroundColor Cyan
             Write-Host "Session: Good\$($fFolder.Name)\$sessionDate" -ForegroundColor Cyan
             if ($numCurAng -ne -999) {
@@ -528,18 +727,22 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 if ($defaultIdx -eq $i) { $displayDefaultIdx = $displayIdx }
             }
 
+            if ($displayItems.Count -eq 0) {
+                $lightsDisplay = "Good\$($fFolder.Name)\$sessionDate"
+                Write-Host "`n[!] No matching Flats for $lightsDisplay (CalibRoot: $sessionCalibBase) (Original: $rawFilt, Target: $targetGrp, Angle: $angDisp)" -ForegroundColor Yellow
+            } else {
             $shownAny = $false
             for ($displayIdx=0; $displayIdx -lt $displayItems.Count; $displayIdx++) {
                 $ent = $displayItems[$displayIdx]
                 $originalIdx = $displayToOriginalMap[$displayIdx]
                 $shownAny = $true
 
-                # Цвета для даты и угла с улучшенной логикой
+                # Date and angle colors with the improved matching logic
                 $dateColor = 'White'; $angColor = 'White'; $rowColor = 'DarkGray'
                 $dateMatch = $ent.DateDiff -eq 0
                 $dateNear = ($ent.DateDiff -le 2)
                 
-                # Пересчитываем даты для текущей строки
+                # Recalculate dates for the current row
                 $candDateStr = if ($ent.Name -match '(?<!\d)(\d{2}\.\d{2}\.\d{2,4})(?!\d)') { $Matches[1] } else { $null }
                 $candDate = $null
                 if ($candDateStr) {
@@ -558,7 +761,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 $angMatch = ($numCurAng -ne -999 -and $ent.Ang -ne -888 -and $angDiff -le 2)
                 $angNear = ($numCurAng -ne -999 -and $ent.Ang -ne -888 -and $angDiff -le 5)
                 
-                # Определяем, является ли этот флэт одним из выбранных ближайших (using original indices)
+                # Determine whether this flat is one of the selected nearest matches (using original indices)
                 $isClosestPast = ($closestPastIdx -eq $originalIdx -or $masterClosestPastIdx -eq $originalIdx)
                 $isClosestFuture = ($closestFutureIdx -eq $originalIdx -or $masterClosestFutureIdx -eq $originalIdx)
                 
@@ -571,7 +774,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 if ($angMatch) { $angColor = 'Green' } 
                 elseif ($angNear) { $angColor = 'Yellow' }
 
-                # Определяем цвет всей строки с новой логикой
+                # Determine the whole-row color with the new logic
                 if ($dateMatch -and $angMatch) { $rowColor = 'Green' }
                 elseif ($dateMatch -or $angMatch) { $rowColor = 'Yellow' }
                 elseif ($isClosestPast -or $isClosestFuture) { $rowColor = 'Blue' }
@@ -579,7 +782,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 else { $rowColor = 'DarkGray' }
                 $relPath = $ent.FullName.Replace($sessionCalibBase, '').TrimStart('\')
 
-                # Формируем строку с цветными датой и углом (using display index)
+                # Build a row with colored date and angle values (using display index)
                 $idxStr = "[$displayIdx]".PadRight(5)
                 $origStr = "[$($ent.Origin)]".PadRight(10)
                 $nameParts = $ent.Name -split ' '
@@ -587,26 +790,26 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 $restStr = $ent.Name.Substring($dateStr.Length).TrimStart()
                 if ($ent.Ang -ne -888) { $angStr = "$($ent.Ang)deg" } else { $angStr = "" }
 
-                # Удалить угол из restStr, если он есть
+                # Remove the angle from restStr when present
                 if ($angStr -ne "") {
                     $restStr = $restStr -replace "\s*\b$($ent.Ang)deg\b", ""
                 }
-                # Выравнивание стрелки - максимальная длина строки до стрелочки 53 символа
+                # Align the arrow at column 53 when possible
                 $leftPart = " $idxStr $origStr $dateStr $restStr $angStr"
                 $arrowCol = 53
                 $arrowPad = ""
                 if ($leftPart.Length -lt $arrowCol) { 
                     $arrowPad = ' ' * ($arrowCol - $leftPart.Length) 
                 } else {
-                    # Если строка превышает лимит, добавляем минимальный отступ
+                    # If the row exceeds the limit, add a minimal gap
                     $arrowPad = "  "
                 }
                 $arrowPad += "<--"
 
-                # Определяем цвет индекса - зелёный для дефолтного выбора (using display index)
+                # Use green for the default selection index (using display index)
                 $idxColor = if ($displayIdx -eq $displayDefaultIdx) { 'Green' } else { 'White' }
 
-                # Выводим строку с цветными датой и углом и поддержкой Blue для умных флэтов
+                # Print the row with colored date/angle values and Blue support for smart flat matches
                 if ($rowColor -eq 'Green') {
                     Write-Host " " -NoNewline
                     Write-Host $idxStr -NoNewline -ForegroundColor $idxColor
@@ -633,15 +836,15 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                     if ($angStr -ne "") { Write-Host $angStr -NoNewline -ForegroundColor $angColor }
                     Write-Host ("$arrowPad $relPath") -ForegroundColor Blue
                 } else {
-                    # Серые строки тоже используют разбивку на компоненты для правильного выравнивания
+                    # Gray rows also use componentized output for proper alignment
                     Write-Host " " -NoNewline
                     Write-Host $idxStr -NoNewline -ForegroundColor $idxColor
                     Write-Host " $origStr $dateStr $restStr $angStr$arrowPad $relPath" -ForegroundColor DarkGray
                 }
             }
 
-            # Дефолтный индекс — используем ранее вычисленный fullGreenIdx или masterGreenIdx
-            # Если нет точных совпадений, но есть фильтр совпадающий по дате - сделать дефолтом
+            # Default index: use the previously computed fullGreenIdx or masterGreenIdx
+            # If there are no exact matches, use a date-matching filter as the default
             if ($displayDefaultIdx -eq -1) {
                 for ($displayIdx=0; $displayIdx -lt $displayItems.Count; $displayIdx++) {
                     $ent = $displayItems[$displayIdx]
@@ -652,7 +855,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 }
             }
             
-            # Если все еще нет дефолта, берем первый доступный
+            # If there is still no default, use the first available item
             if ($displayDefaultIdx -eq -1 -and $displayItems.Count -gt 0) {
                 $displayDefaultIdx = 0
             }
@@ -690,6 +893,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
             Write-Host ""
             $fFound = $displayItems[$selectedIdx]
             $foundIn = $fFound.Origin
+            }
         }
 
         if ($fFound) {
@@ -698,7 +902,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
             $pendingLinks += [PSCustomObject]@{ Type="Flats"; Tag=$sTag; Src=$fFound.FullName; Display=$fDisp; Cam=$sessionCamFull }
 
             # Check for potential keyword conflicts in flat files
-            $flatFiles = Get-ChildItem $fFound.FullName -Filter "*.fit*" -ErrorAction SilentlyContinue
+            $flatFiles = Get-ChildItem -LiteralPath $fFound.FullName -Filter "*.fit*" -ErrorAction SilentlyContinue
             if ($flatFiles) {
                 foreach ($flatFile in $flatFiles) {
                     $fileName = $flatFile.Name
@@ -716,7 +920,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
             }
 
             # Flat-Darks
-            $fSample = Get-ChildItem $fFound.FullName -Filter "*.fit*" | Select-Object -First 1
+            $fSample = Get-ChildItem -LiteralPath $fFound.FullName -Filter "*.fit*" -ErrorAction Stop | Select-Object -First 1
             if ($fSample -and ($fSample.Name -match "_(\d+\.?\d*)m?s_")) {
                 $fdExp = $Matches[1] + "s"
                 $fd = Get-CalibPath "FlatDarks" $curGain $curTemp $fdExp $sessionCalibBase
@@ -724,7 +928,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
                 $fdTag = "Exp_${fdExp}_Gain_${curGain}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
                     $pendingLinks += [PSCustomObject]@{ Type="FlatDarks"; Tag=$fdTag; Src=$fd.Path; Display=$fd.Display; Cam=$sessionCamFull }
                     # Check for potential keyword conflicts in flat-dark files
-                    $flatDarkFiles = Get-ChildItem $fd.Path -Filter "*.fit*" -ErrorAction SilentlyContinue
+                    $flatDarkFiles = Get-ChildItem -LiteralPath $fd.Path -Filter "*.fit*" -ErrorAction SilentlyContinue
                     if ($flatDarkFiles) {
                         foreach ($flatDarkFile in ($flatDarkFiles | Select-Object -First 3)) {  # Check only first 3 files for performance
                             $fileName = $flatDarkFile.Name
@@ -742,7 +946,7 @@ foreach ($fFolder in (Get-ChildItem $lightsRoot -Directory)) {
         }
 
         # --- DARKS & BIAS ---
-        # Добавляем Target и Filter в симлинки для калибровочных кадров
+        # Add Target and Filter to calibration frame symlink names
         $dTag = "Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
         $bTag = "Gain_${curGain}_Temp_${roundT}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
 
@@ -798,8 +1002,11 @@ if ($pendingLinks.Count -gt 0) {
     $uniqueSourcePaths = $pendingLinks.Src | Select-Object -Unique
     $totalSize = 0
     foreach ($srcPath in $uniqueSourcePaths) {
-        if (Test-Path $srcPath) {
-            $totalSize += (Get-ChildItem $srcPath -Recurse -File | Measure-Object -Property Length -Sum).Sum
+        if (Test-Path -LiteralPath $srcPath) {
+            $size = (Get-ChildItem -LiteralPath $srcPath -Recurse -File -ErrorAction Stop | Measure-Object -Property Length -Sum).Sum
+            if ($null -ne $size) {
+                $totalSize += $size
+            }
         }
     }
     $totalSizeGB = [Math]::Round($totalSize / 1GB, 2)
@@ -814,11 +1021,9 @@ if ($pendingLinks.Count -gt 0) {
         # --- ACTION 1: Create Symlinks ---
         Write-Host "`nCreating symlinks..." -ForegroundColor Green
         foreach ($l in $pendingLinks) {
-            $target = Join-Path $sourcePath "$($l.Type)\$($l.Tag)"
-            if (!(Test-Path $target)) { 
-                New-Item -ItemType Directory -Path (Split-Path $target) -Force | Out-Null
-                New-Item -ItemType SymbolicLink -Path $target -Value $l.Src | Out-Null 
-            }
+            $targetTypePath = Join-Path -Path $sourcePath -ChildPath $l.Type
+            $target = Join-Path -Path $targetTypePath -ChildPath $l.Tag
+            New-CreateProjectSymbolicLink -Path $target -Target $l.Src
         }
         Write-Host "`n[DONE] Symlinks created. Project Root: $setupRoot" -ForegroundColor Yellow
 
@@ -832,13 +1037,10 @@ if ($pendingLinks.Count -gt 0) {
             $targetsForSrc = $pendingLinks | Where-Object { $_.Src -eq $l.Src }
             
             foreach ($targetEntry in $targetsForSrc) {
-                $targetPath = Join-Path $sourcePath "$($targetEntry.Type)\$($targetEntry.Tag)"
-                if (!(Test-Path $targetPath)) {
-                    New-Item -ItemType Directory -Path (Split-Path $targetPath) -Force | Out-Null
-                    Write-Host "Copying from $($l.Src) to $targetPath" -ForegroundColor DarkGray
-                    # Robocopy is multi-threaded by default (/MT) and more robust
-                    robocopy $l.Src $targetPath /E /MT /R:2 /W:5 | Out-Null
-                }
+                $targetTypePath = Join-Path -Path $sourcePath -ChildPath $targetEntry.Type
+                $targetPath = Join-Path -Path $targetTypePath -ChildPath $targetEntry.Tag
+                Write-Host "Copying from $($l.Src) to $targetPath" -ForegroundColor DarkGray
+                Copy-CreateProjectDirectory -Source $l.Src -Destination $targetPath
             }
         }
         Write-Host "`n[DONE] Files copied. Project Root: $setupRoot" -ForegroundColor Yellow
@@ -866,7 +1068,7 @@ Write-Host "- Consider renaming conflicting files to use normalized filter names
 Write-Host "- Consider removing conflicting keywords from calibration file (FILTER, GAIN etc)" -ForegroundColor Yellow
 Write-Host "- Alternative: Use WBPP's 'Smart naming override' option and clear/reload file list" -ForegroundColor Gray
 
-# --- После завершения сканирования и построения camMap ---
+# --- After scan completion and camMap construction ---
 
 $meta = @{
     Object = $astroObj
@@ -880,8 +1082,9 @@ foreach ($cam in $camMap.Keys) {
     $entry = $camMap[$cam]
     $filters = ($entry.Sanitized | Select-Object -Unique)
     $targets = ($entry.Targets | Select-Object -Unique)
-    # Калибровочные папки (поискать Master-корни для камеры)
-    $calibBase = "$baseZ\Calibration\$cam"
+    # Calibration folders: look for Master roots for each camera
+    $calibrationRoot = Join-Path -Path $baseZ -ChildPath "Calibration"
+    $calibBase = Join-Path -Path $calibrationRoot -ChildPath $cam
     $calibFolders = @{
         Darks = Join-Path $calibBase "Master\darks"
         Biases = Join-Path $calibBase "Master\biases"
@@ -896,7 +1099,9 @@ foreach ($cam in $camMap.Keys) {
     }
 }
 
-# Сохраняем JSON рядом с Pix/Good
+# Save JSON next to Pix/Good
 $metaPath = Join-Path (Split-Path $pixPath -Parent) "project_meta.json"
-$meta | ConvertTo-Json -Depth 6 | Out-File -Encoding UTF8 $metaPath
-Write-Host "`n[INFO] Project metadata saved to: $metaPath" -ForegroundColor Cyan
+if ($PSCmdlet.ShouldProcess($metaPath, "Write project metadata")) {
+    $meta | ConvertTo-Json -Depth 6 | Out-File -Encoding UTF8 -LiteralPath $metaPath
+    Write-Host "`n[INFO] Project metadata saved to: $metaPath" -ForegroundColor Cyan
+}

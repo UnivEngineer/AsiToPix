@@ -1,14 +1,18 @@
-Write-Host "--- WBPP Master Exporter v6 (JSON Project Meta) ---" -ForegroundColor Cyan
+﻿Write-Host "--- WBPP Master Exporter v6 (JSON Project Meta) ---" -ForegroundColor Cyan
 
-# Запросить путь к project_meta.json
+$pathsModule = Join-Path $PSScriptRoot "src\AsiToPix.Paths.psm1"
+Import-Module $pathsModule -Force
+
+# Ask for the path to project_meta.json
 $metaPath = (Read-Host "Paste path to project_meta.json (e.g. D:\Astro\M_101\Season-Scope\project_meta.json)").Trim('"')
 if (!(Test-Path $metaPath)) {
     Write-Host "[!] Error: project_meta.json not found!" -ForegroundColor Red; exit
 }
 
-# Прочитать и распарсить JSON
+# Read and parse JSON
 $meta = Get-Content $metaPath -Raw | ConvertFrom-Json
-$baseZ = "Z:\AstroPhoto\Calibration"
+$astroPhotoRoot = Resolve-AstroPhotoRoot
+$baseZ = Join-Path $astroPhotoRoot "Calibration"
 
 $pixPath = $meta.PixPath
 $masterPath = "$pixPath\master"
@@ -16,7 +20,7 @@ if (!(Test-Path $masterPath)) {
     Write-Host "[!] Error: Master folder not found! ($masterPath)" -ForegroundColor Red; exit
 }
 
-$res = "6248x4176" # Можно добавить в meta при желании
+$res = "6248x4176" # Can be added to meta later if needed
 
 $masters = Get-ChildItem $masterPath -Filter "*.xisf"
 
@@ -30,14 +34,14 @@ foreach ($cam in $meta.Cameras) {
         $targetSub = ""
         $newName = ""
 
-        # Парсинг метаданных из длинного имени WBPP
+        # Parse metadata from the long WBPP filename
         $gain = if ($name -match "GAIN-(\d+)") { $Matches[1] } else { "120" }
         $filt = if ($name -match "FILTER-([^_]+)") { $Matches[1] } else { "L" }
         $expStr = if ($name -match "EXP-([\d\.]+s?)") { $Matches[1] } else { "300s" }
         $sess = if ($name -match "SESSION-([\d\.]+)") { $Matches[1] } else { "Unknown" }
         $temp = if ($name -match "TEMP-([\-\d\.]+C)") { $Matches[1] } else { "-20C" }
 
-        # Числовое значение экспозиции для логики Flat-Darks
+        # Numeric exposure value for Flat-Dark classification
         $expNum = [double]($expStr -replace 's', '')
 
         if ($name -match "masterFlat") {
@@ -46,11 +50,11 @@ foreach ($cam in $meta.Cameras) {
         }
         elseif ($name -match "masterDark") {
             if ($expNum -lt 10) {
-                # Это Flat-Dark (экспозиция < 10 сек)
+                # Treat this as Flat-Dark (exposure < 10 seconds)
                 $targetSub = "Master\flat-darks\Gain$gain\$temp\$($expNum)s"
                 $newName = "masterDark_BIN-1_${res}_EXPOSURE-$($expNum)s.xisf"
             } else {
-                # Это обычный Dark
+                # Treat this as a regular Dark
                 $targetSub = "Master\darks\Gain$gain\$temp\$($expNum)s"
                 $newName = "masterDark_BIN-1_${res}_EXPOSURE-$($expNum).00s.xisf"
             }

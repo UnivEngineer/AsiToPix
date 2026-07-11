@@ -1,6 +1,8 @@
-# Combine Seasons Script
+п»ї# Combine Seasons Script
 # Run as Admin for Symlinks
-fsutil behavior set SymlinkEvaluation L2R:1 | Out-Null
+$environmentModule = Join-Path $PSScriptRoot "src\AsiToPix.Environment.psm1"
+Import-Module $environmentModule -Force
+Initialize-AsiToPixEnvironment
 
 # Enable long path support
 try {
@@ -12,7 +14,7 @@ try {
 
 Write-Host "--- COMBINE SEASONS ---" -ForegroundColor Cyan
 
-# Запрашиваем корневую папку с сезонами
+# Ask for the root folder containing season directories
 $rootPath = (Read-Host "Enter path to root folder containing season directories").Trim('"')
 
 if (!(Test-Path $rootPath)) {
@@ -22,7 +24,7 @@ if (!(Test-Path $rootPath)) {
 
 Write-Host "`nScanning for season folders in: $rootPath" -ForegroundColor Yellow
 
-# Автоматически находим папки сезонов (содержащие папку Source), исключаем Combined
+# Auto-detect season folders containing Source, excluding Combined
 $availableSeasons = @()
 $seasonFolders = @()
 
@@ -47,11 +49,11 @@ if ($availableSeasons.Count -eq 0) {
     exit
 }
 
-# Позволяем пользователю выбрать какие сезоны объединять
+# Let the user choose which seasons to combine
 Write-Host "`n--- SELECT SEASONS TO COMBINE ---" -ForegroundColor Cyan
 foreach ($season in $availableSeasons) {
     $choice = Read-Host "Add season '$($season.Name)' to combine? (Y/n)"
-    if ($choice -eq '' -or $choice -match '^[yYдД]') {
+    if ($choice -eq '' -or $choice -match '^[yYРґР”]') {
         $seasonFolders += $season.Path
         Write-Host "  [v] Added: $($season.Name)" -ForegroundColor Green
     } else {
@@ -65,21 +67,21 @@ if ($seasonFolders.Count -eq 0) {
     exit
 }
 
-# Общая папка для объединения
+# Shared output folder for the combined project
 $combineRoot = Join-Path $rootPath "Combined"
 $combineSource = Join-Path $combineRoot "Source"
 $combinePix = Join-Path $combineRoot "Pix"
 
-# Проверяем существование папки Combined и запрашиваем очистку если нужно
+# If Combined already exists, ask whether it should be cleaned
 if (Test-Path $combineRoot) {
     $cleanChoice = Read-Host "`nCombined folder already exists. Clean it? (Y/n)"
-    if ($cleanChoice -eq '' -or $cleanChoice -match '^[yYдД]') { 
+    if ($cleanChoice -eq '' -or $cleanChoice -match '^[yYРґР”]') { 
         Write-Host "Cleaning Combined folder..." -ForegroundColor Yellow
         Remove-Item $combineRoot -Recurse -Force 
     }
 }
 
-# Создаем папки если не существуют
+# Create folders when they do not exist
 if (!(Test-Path $combineSource)) { 
     New-Item -ItemType Directory -Path $combineSource -Force | Out-Null 
 }
@@ -98,7 +100,7 @@ foreach ($seasonPath in $seasonFolders) {
     $seasonName = Split-Path (Split-Path $seasonPath -Parent) -Leaf
     Write-Host "`nProcessing season: $seasonName" -ForegroundColor Green
     
-    # Проходим по типам калибровки (Lights, Darks, Biases, Flats, FlatDarks)
+    # Iterate over frame type folders (Lights, Darks, Biases, Flats, FlatDarks)
     foreach ($typeFolder in (Get-ChildItem $seasonPath -Directory)) {
         $typeName = $typeFolder.Name
         $combineTypeFolder = Join-Path $combineSource $typeName
@@ -107,14 +109,14 @@ foreach ($seasonPath in $seasonFolders) {
             New-Item -ItemType Directory -Path $combineTypeFolder -Force | Out-Null
         }
         
-        # Проходим по всем симлинкам в папке типа
+        # Iterate over all symlinks in the frame type folder
         foreach ($symlink in (Get-ChildItem $typeFolder.FullName -Directory)) {
             $originalTarget = $null
             try {
-                # Получаем оригинальный путь симлинка
+                # Read the original symlink target
                 $item = Get-Item $symlink.FullName
                 if ($item.LinkType -eq 'SymbolicLink') {
-                    # Исправляем проблему с массивом - берем первый элемент
+                    # Target may be an array; use the first element
                     $targetArray = $item.Target
                     if ($targetArray -is [array]) {
                         $originalTarget = $targetArray[0]
@@ -122,7 +124,7 @@ foreach ($seasonPath in $seasonFolders) {
                         $originalTarget = $targetArray
                     }
                 } else {
-                    # Если это обычная папка, используем её путь
+                    # For ordinary folders, use their own path
                     $originalTarget = $symlink.FullName
                 }
             } catch {
@@ -131,7 +133,7 @@ foreach ($seasonPath in $seasonFolders) {
             }
             
             if ($originalTarget -and (Test-Path $originalTarget)) {
-                # Используем оригинальное имя - пути уже уникальные по дате/настройкам
+                # Keep the original name; paths should already be unique by date/setup
                 $newSymlinkPath = Join-Path $combineTypeFolder $symlink.Name
                 
                 if (!(Test-Path $newSymlinkPath)) {
@@ -143,7 +145,7 @@ foreach ($seasonPath in $seasonFolders) {
                         Write-Host "    Target was: $originalTarget" -ForegroundColor Yellow
                     }
                 } else {
-                    # Это НЕ должно происходить, так как пути уникальны по дате/настройкам
+                    # This should not happen because paths are expected to be unique by date/setup
                     Write-Host "[!] CONFLICT: $typeName\$($symlink.Name) already exists! This shouldn't happen." -ForegroundColor Red
                     Write-Host "    Existing: $(Get-Item $newSymlinkPath | Select-Object -ExpandProperty Target)" -ForegroundColor Yellow
                     Write-Host "    New:      $originalTarget" -ForegroundColor Yellow

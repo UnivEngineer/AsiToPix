@@ -1,0 +1,81 @@
+{
+    "folders": [
+        {
+            "name": "AsiToPix",
+            "path": "."
+        }
+    ],
+
+    "settings": {
+        "files.encoding": "utf8",
+        "files.eol": "\r\n",
+        "files.trimTrailingWhitespace": true,
+        "files.insertFinalNewline": true,
+
+        "editor.rulers": [
+            100
+        ],
+
+        "[powershell]": {
+            "editor.defaultFormatter": "ms-vscode.powershell",
+            "editor.formatOnSave": true,
+            "editor.tabSize": 4,
+            "editor.insertSpaces": true
+        },
+
+        "powershell.powerShellAdditionalExePaths": {
+            "PowerShell 7": "C:\\Program Files\\PowerShell\\7\\pwsh.exe"
+        },
+        "powershell.powerShellDefaultVersion": "PowerShell 7"
+    },
+
+    "extensions": {
+        "recommendations": [
+            "ms-vscode.powershell",
+            "openai.chatgpt"
+        ]
+    },
+
+    "tasks": {
+        "version": "2.0.0",
+        "tasks": [
+            {
+                "label": "PowerShell: Parse scripts",
+                "type": "shell",
+                "command": "pwsh",
+                "args": [
+                    "-NoProfile",
+                    "-Command",
+                    "$failed = $false; Get-ChildItem '${workspaceFolder}' -Filter '*.ps1' -Recurse | ForEach-Object { $tokens = $null; $errors = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors); if ($errors.Count) { $failed = $true; Write-Host \"`n$($_.FullName)\" -ForegroundColor Red; $errors | Format-List } }; if ($failed) { exit 1 }"
+                ],
+                "problemMatcher": [],
+                "group": {
+                    "kind": "test",
+                    "isDefault": true
+                }
+            },
+            {
+                "label": "PowerShell: PSScriptAnalyzer",
+                "type": "shell",
+                "command": "pwsh",
+                "args": [
+                    "-NoProfile",
+                    "-Command",
+                    "Invoke-ScriptAnalyzer -Path '${workspaceFolder}' -Recurse"
+                ],
+                "problemMatcher": []
+            },
+            {
+                "label": "PowerShell: Pester",
+                "type": "shell",
+                "command": "pwsh",
+                "args": [
+                    "-NoProfile",
+                    "-Command",
+                    "Invoke-Pester -Path '${workspaceFolder}\\tests' -Output Detailed"
+                ],
+                "problemMatcher": []
+            }
+        ]
+    }
+}

@@ -7,8 +7,9 @@
 - [ ] `CreateProject.ps1`: перед `Remove-Item $sourcePath -Recurse -Force` проверять, что удаляемая папка действительно создана проектом и находится внутри ожидаемого project root.
 - [ ] `CombineSeasons.ps1`: перед `Remove-Item $combineRoot -Recurse -Force` валидировать resolved path и использовать marker/metadata созданного проектом каталога.
 - [ ] `CreateProject.ps1`: перед созданием или заменой target path проверять, что существующий объект является symbolic link, а не обычным файлом или папкой.
-- [ ] `ExportMasters.ps1`: убрать безусловный `Copy-Item -Force` или явно оформить безопасную политику overwrite.
+- [x] `ExportMasters.ps1`: заменить безусловный `Copy-Item -Force` на интерактивное безопасное копирование и замену мастеров.
 - [ ] Добавить `-WhatIf` через `[CmdletBinding(SupportsShouldProcess)]` для операций создания, удаления, копирования и замены файлов/каталогов.
+- [x] `ExportMasters.ps1`: поддержать `-WhatIf` для копирования, переименования и замены мастеров.
 - [ ] Не менять системные настройки (`fsutil`, `HKLM:\...\LongPathsEnabled`) без явного параметра/подтверждения и документации требований администратора.
 
 ## Ошибки и пограничные случаи
@@ -25,11 +26,15 @@
 - [ ] `CreateProject.ps1`: проверить regex извлечения фильтра из имени файла, особенно выражение с escaped camera id.
 - [ ] `CreateProject.ps1`: проверить fallback defaults (`gain=120`, `exp=300s`, `temp=-20`) и явно предупреждать, когда metadata не распознана.
 - [ ] `CreateProject.ps1`: проверить подсчет total size, когда `Measure-Object -Sum` возвращает `$null`.
-- [ ] `ExportMasters.ps1`: валидировать структуру и обязательные поля `project_meta.json` (`PixPath`, `Scope`, `Cameras[].Name`).
-- [ ] `ExportMasters.ps1`: не классифицировать любой `masterDark` с экспозицией `< 10s` как flat-dark без дополнительного признака.
-- [ ] `ExportMasters.ps1`: убрать hardcoded resolution `6248x4176` или получать его из metadata/имени файла.
-- [ ] `ExportMasters.ps1`: сделать matching камеры точнее, чем `*$camFull*`, чтобы избежать ложных совпадений.
-- [ ] `ExportMasters.ps1`: обрабатывать отсутствие подходящих `.xisf` мастеров с понятным сообщением.
+- [x] Не трактовать фильтр `S` в именах flat-папок как единицу измерения экспозиции.
+- [x] `ExportMasters.ps1`: валидировать структуру и обязательные поля `project_meta.json` (`PixPath`, `Scope`, `Cameras[].Name`).
+- [x] `ExportMasters.ps1`: не классифицировать любой `masterDark` с экспозицией `< 10s` как flat-dark без дополнительного признака.
+- [x] `ExportMasters.ps1`: убрать hardcoded resolution `6248x4176` или получать его из metadata/имени файла.
+- [x] `ExportMasters.ps1`: сделать matching камеры точнее, чем `*$camFull*`, чтобы избежать ложных совпадений.
+- [x] `ExportMasters.ps1`: обрабатывать отсутствие подходящих `.xisf` мастеров с понятным сообщением.
+- [x] `CreateProject.ps1`: сохранять в `project_meta.json` точные `CalibrationSources` и destination-папки, необходимые экспортёру.
+- [x] `ExportMasters.ps1`: читать `CalibrationSources` из metadata с fallback на project Source links для старых проектов.
+- [x] Использовать каноническую project-папку `Source\flat-darks`, сохранив чтение старой `Source\FlatDarks`.
 - [ ] `CombineSeasons.ps1`: добавить стратегию конфликтов одинаковых имен symlink-папок вместо сообщения "shouldn't happen".
 - [ ] `CombineSeasons.ps1`: создавать или объединять `project_meta.json` для `Combined`.
 - [ ] `CombineSeasons.ps1`: если входной элемент не symlink, явно решать, допустимо ли ссылаться на обычную папку внутри сезонного `Source`.
@@ -44,6 +49,7 @@
 - [ ] Вынести интерактивные подтверждения `Y/n` в общий helper.
 - [ ] Вынести безопасное создание каталогов, symlink и copy operations в общий helper.
 - [ ] Разделить scan/plan/apply: сначала строить план действий, потом применять его после подтверждения.
+- [x] `ExportMasters.ps1`: реализовать scan/plan/apply, подтверждение каждого изменения, исправление legacy-имён и транзакционную замену мастеров.
 - [ ] Заменить ручную конкатенацию путей на `Join-Path`, `Resolve-Path` и `[System.IO.Path]` там, где это еще не сделано.
 - [ ] Сделать сообщения об ошибках actionable и включать affected path.
 - [ ] Привести PowerShell function names к approved verbs.
@@ -52,7 +58,10 @@
 
 ## Тесты и проверка
 
-- [ ] Добавить Pester tests под `tests/`.
+- [x] Добавить выровненный и TSV-отчет по сабам из `*:\AstroPhoto\Import` с разбивкой по сетапам, объектам, фильтрам, ночам и экспозициям.
+- [x] Добавить Pester tests под `tests/`.
+- [x] Покрыть тестами очистку имён WBPP masters, дедупликацию dark/bias/flat и выбор dark/flat-dark по project Source links.
+- [x] Покрыть тестами schema v2 `project_meta.json` и экспорт без чтения project Source links.
 - [ ] Покрыть тестами filter mapping для OSC и Mono.
 - [ ] Покрыть тестами формирование project paths и symlink tag names.
 - [ ] Покрыть тестами поиск calibration paths (`Master` перед `Source`, temperature rounding, exposure exact/prefix match).
@@ -61,3 +70,15 @@
 - [ ] Добавить проверку синтаксиса всех PowerShell-файлов.
 - [ ] Запускать PSScriptAnalyzer, если он доступен.
 - [ ] После каждого изменения показывать `git diff`.
+## Recent fixes
+
+- [x] `Get-ImportReport.ps1`: express every exposure group as `(night counts)*exposure` without dividing by the characteristic exposure.
+- [x] `Get-ImportReport.ps1`: group repeated alternate-exposure multipliers across nights to shorten report expressions.
+- [x] `ImportSession.ps1`: require exact catalog identifiers for fuzzy object matching so `M 16` does not match `M 17`.
+- [x] `ImportSession.ps1`: use the source object folder name instead of unreliable ASIAir FITS object names such as `FOV` or stale autorun targets.
+- [x] `Get-ImportReport.ps1`: use RGB/L/H/O/S order, report discovered Import folders and total integration time, and colorize interactive output.
+- [x] `CreateProject.ps1`: reduce WBPP calibration tag noise and deduplicate repeated dark/bias/flat-dark source links.
+- [x] `CreateProject.ps1`: deduplicate repeated flat source links by actual path and remove light-session-specific flat tags.
+- [x] `CreateProject.ps1`: tested `DUMMY` calibration tags and reverted them because WBPP needs matching keyword values.
+- [x] `CreateProject.ps1`: restore full WBPP calibration tags and report repeated calibration sources without changing project links.
+- [x] `CreateProject.ps1`: suppress repeated calibration warnings for Master folders because WBPP can reuse the same master file.

@@ -63,6 +63,19 @@ function ConvertTo-AsiToPixNameToken {
     return @($normalized.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries) | Select-Object -Unique)
 }
 
+function Get-AsiToPixCatalogIdentifier {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if ($Name -match '(?i)\b(?<catalog>M|NGC|IC|SH2|SH|LBN|LDN)\s*[- ]?\s*(?<number>\d+[A-Z]?)\b') {
+        return "$($Matches["catalog"].ToUpperInvariant()) $($Matches["number"].ToUpperInvariant())"
+    }
+
+    return ""
+}
+
 function Get-AsiToPixNameMatch {
     param(
         [Parameter(Mandatory = $true)]
@@ -81,6 +94,7 @@ function Get-AsiToPixNameMatch {
     $detectedLower = $detected.ToLowerInvariant()
     $detectedCompact = $detectedLower -replace '[^a-z0-9]+', ''
     $detectedTokens = @(ConvertTo-AsiToPixNameToken -Name $detected)
+    $detectedCatalogIdentifier = Get-AsiToPixCatalogIdentifier -Name $detected
 
     $nameMatches = foreach ($candidate in $Candidates) {
         if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
@@ -88,7 +102,16 @@ function Get-AsiToPixNameMatch {
         $candidateLower = $candidate.ToLowerInvariant()
         $candidateCompact = $candidateLower -replace '[^a-z0-9]+', ''
         $candidateTokens = @(ConvertTo-AsiToPixNameToken -Name $candidate)
+        $candidateCatalogIdentifier = Get-AsiToPixCatalogIdentifier -Name $candidate
         $score = 0
+
+        if (-not [string]::IsNullOrWhiteSpace($detectedCatalogIdentifier)) {
+            if ($candidateCatalogIdentifier -ne $detectedCatalogIdentifier) {
+                continue
+            }
+
+            $score += 500
+        }
 
         if ($candidateLower -eq $detectedLower) {
             $score += 1000
@@ -331,6 +354,24 @@ function Get-AsiToPixDetectedTelescope {
     return $FallbackTelescope
 }
 
+function Get-AsiToPixDetectedObject {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath
+    )
+
+    $directory = Get-Item -LiteralPath $SourcePath
+    if (-not $directory.PSIsContainer) {
+        $directory = Get-Item -LiteralPath (Split-Path -Path $directory.FullName -Parent)
+    }
+
+    if ($directory.Name -notin @("Light", "Lights", "Good", "Trash")) {
+        return $directory.Name
+    }
+
+    return ""
+}
+
 function Get-AsiToPixFitsFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -508,13 +549,13 @@ function Import-AsiToPixSession {
     }
 
     $sample = $parsedFiles[0]
-    $detectedObject = if ([string]::IsNullOrWhiteSpace($ObjectName)) { $sample.ObjectName } else { $ObjectName }
+    $detectedSourceObject = Get-AsiToPixDetectedObject -SourcePath $resolvedSourcePath
+    $detectedObject = if ([string]::IsNullOrWhiteSpace($ObjectName)) { $detectedSourceObject } else { $ObjectName }
     $detectedCamera = if ([string]::IsNullOrWhiteSpace($CameraName)) { $sample.CameraName } else { $CameraName }
     $detectedTelescope = Get-AsiToPixDetectedTelescope -SourcePath $resolvedSourcePath -FallbackTelescope $sample.Telescope
 
     if ([string]::IsNullOrWhiteSpace($detectedObject)) {
-        $sourceLeaf = Split-Path -Path $resolvedSourcePath -Leaf
-        $detectedObject = $sourceLeaf
+        $detectedObject = Read-AsiToPixRequiredValue -Prompt "Enter detected/source object name"
     }
 
     if ([string]::IsNullOrWhiteSpace($detectedTelescope)) {

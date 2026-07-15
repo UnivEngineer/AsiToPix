@@ -37,6 +37,16 @@ Describe "ImportSession parsing" {
         $nameMatches[0].Name | Should Be "NGC 7293 (Helix nebula)"
     }
 
+    It "does not match neighboring catalog numbers by a shared catalog prefix" {
+        $nameMatches = @(Get-AsiToPixNameMatch -DetectedName "M 16" -Candidates @(
+            "M 16 - Eagle nebula",
+            "M 17 - Omega nebula"
+        ))
+
+        $nameMatches.Count | Should Be 1
+        $nameMatches[0].Name | Should Be "M 16 - Eagle nebula"
+    }
+
     It "returns an empty filename set as a usable object" {
         $emptyFolder = Join-Path -Path $TestDrive -ChildPath "empty"
         $env:ASITOPIX_EMPTY_TEST_FOLDER = $emptyFolder
@@ -50,5 +60,18 @@ Describe "ImportSession parsing" {
         }
 
         Remove-Item Env:\ASITOPIX_EMPTY_TEST_FOLDER
+    }
+
+    It "detects the import object from the source folder, not from the FITS name" {
+        $objectFolder = Join-Path -Path $TestDrive -ChildPath "APO120 @ 0.8x\Light\M 16"
+        $env:ASITOPIX_OBJECT_TEST_FOLDER = $objectFolder
+        New-Item -ItemType Directory -Path $objectFolder -Force | Out-Null
+        New-Item -ItemType File -Path (Join-Path -Path $objectFolder -ChildPath "Light_FOV_180.0s_Bin1_2600MM_S_gain120_20260713-011758_190deg_-10.0C_APO120_0001.fit") -Force | Out-Null
+
+        InModuleScope AsiToPix.ImportSession {
+            Get-AsiToPixDetectedObject -SourcePath $env:ASITOPIX_OBJECT_TEST_FOLDER | Should Be "M 16"
+        }
+
+        Remove-Item Env:\ASITOPIX_OBJECT_TEST_FOLDER
     }
 }

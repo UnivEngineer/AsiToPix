@@ -4,6 +4,9 @@ $environmentModule = Join-Path $PSScriptRoot "src\AsiToPix.Environment.psm1"
 Import-Module $environmentModule -Force
 Initialize-AsiToPixEnvironment
 
+$projectMetadataModule = Join-Path $PSScriptRoot "src\AsiToPix.ProjectMetadata.psm1"
+Import-Module $projectMetadataModule -Force
+
 # Enable long path support
 try {
     $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem"
@@ -16,6 +19,7 @@ Write-Host "--- COMBINE SEASONS ---" -ForegroundColor Cyan
 
 # Ask for the root folder containing season directories
 $rootPath = (Read-Host "Enter path to root folder containing season directories").Trim('"')
+Write-AsiToPixCyrillicPathWarning -Path $rootPath -Context "root path"
 
 if (!(Test-Path $rootPath)) {
     Write-Host "[!] Root folder not found: $rootPath" -ForegroundColor Red
@@ -71,6 +75,7 @@ if ($seasonFolders.Count -eq 0) {
 $combineRoot = Join-Path $rootPath "Combined"
 $combineSource = Join-Path $combineRoot "Source"
 $combinePix = Join-Path $combineRoot "Pix"
+Write-AsiToPixCyrillicPathWarning -Path $combineRoot -Context "combined project path"
 
 # If Combined already exists, ask whether it should be cleaned
 if (Test-Path $combineRoot) {
@@ -92,6 +97,7 @@ if (!(Test-Path $combinePix)) {
 Write-Host "`nCombining $($seasonFolders.Count) seasons into: $combineSource" -ForegroundColor Yellow
 
 foreach ($seasonPath in $seasonFolders) {
+    Write-AsiToPixCyrillicPathWarning -Path $seasonPath -Context "season source path"
     if (!(Test-Path $seasonPath)) {
         Write-Host "[!] Season folder not found: $seasonPath" -ForegroundColor Red
         continue
@@ -100,9 +106,9 @@ foreach ($seasonPath in $seasonFolders) {
     $seasonName = Split-Path (Split-Path $seasonPath -Parent) -Leaf
     Write-Host "`nProcessing season: $seasonName" -ForegroundColor Green
     
-    # Iterate over frame type folders (Lights, Darks, Biases, Flats, FlatDarks)
+    # Iterate over frame type folders and normalize the legacy FlatDarks name.
     foreach ($typeFolder in (Get-ChildItem $seasonPath -Directory)) {
-        $typeName = $typeFolder.Name
+        $typeName = Get-AsiToPixProjectSourceFolderName -Type $typeFolder.Name
         $combineTypeFolder = Join-Path $combineSource $typeName
         
         if (!(Test-Path $combineTypeFolder)) {
@@ -133,6 +139,7 @@ foreach ($seasonPath in $seasonFolders) {
             }
             
             if ($originalTarget -and (Test-Path $originalTarget)) {
+                Write-AsiToPixCyrillicPathWarning -Path $originalTarget -Context "symlink target path"
                 # Keep the original name; paths should already be unique by date/setup
                 $newSymlinkPath = Join-Path $combineTypeFolder $symlink.Name
                 

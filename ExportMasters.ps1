@@ -1,87 +1,60 @@
-﻿Write-Host "--- WBPP Master Exporter v6 (JSON Project Meta) ---" -ForegroundColor Cyan
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [string]$MetaPath,
 
-$pathsModule = Join-Path $PSScriptRoot "src\AsiToPix.Paths.psm1"
+    [string]$AstroPhotoRoot
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+Write-Host "--- WBPP Master Exporter ---" -ForegroundColor Cyan
+
+$environmentModule = Join-Path -Path $PSScriptRoot -ChildPath "src\AsiToPix.Environment.psm1"
+Import-Module $environmentModule -Force
+
+$pathsModule = Join-Path -Path $PSScriptRoot -ChildPath "src\AsiToPix.Paths.psm1"
 Import-Module $pathsModule -Force
 
-# Ask for the path to project_meta.json
-$metaPath = (Read-Host "Paste path to project_meta.json (e.g. D:\Astro\M_101\Season-Scope\project_meta.json)").Trim('"')
-if (!(Test-Path $metaPath)) {
-    Write-Host "[!] Error: project_meta.json not found!" -ForegroundColor Red; exit
+$exportModule = Join-Path -Path $PSScriptRoot -ChildPath "src\AsiToPix.ExportMasters.psm1"
+Import-Module $exportModule -Force
+
+if ([string]::IsNullOrWhiteSpace($MetaPath)) {
+    $MetaPath = (Read-Host "Paste path to project_meta.json").Trim('"')
 }
+Write-AsiToPixPathConventionWarning -Path $MetaPath -Context "project metadata path"
 
-# Read and parse JSON
-$meta = Get-Content $metaPath -Raw | ConvertFrom-Json
-$astroPhotoRoot = Resolve-AstroPhotoRoot
-$baseZ = Join-Path $astroPhotoRoot "Calibration"
+$metadata = Read-AsiToPixProjectMetadata -Path $MetaPath
 
-$pixPath = $meta.PixPath
-$masterPath = "$pixPath\master"
-if (!(Test-Path $masterPath)) {
-    Write-Host "[!] Error: Master folder not found! ($masterPath)" -ForegroundColor Red; exit
-}
-
-$res = "6248x4176" # Can be added to meta later if needed
-
-$masters = Get-ChildItem $masterPath -Filter "*.xisf"
-
-foreach ($cam in $meta.Cameras) {
-    $camFull = $cam.Name
-    $telSetup = $meta.Scope
-    Write-Host "`n--- Exporting for camera: $camFull ---" -ForegroundColor Cyan
-    $mastersForCam = $masters | Where-Object { $_.Name -like "*$camFull*" }
-    foreach ($m in $mastersForCam) {
-        $name = $m.Name
-        $targetSub = ""
-        $newName = ""
-
-        # Parse metadata from the long WBPP filename
-        $gain = if ($name -match "GAIN-(\d+)") { $Matches[1] } else { "120" }
-        $filt = if ($name -match "FILTER-([^_]+)") { $Matches[1] } else { "L" }
-        $expStr = if ($name -match "EXP-([\d\.]+s?)") { $Matches[1] } else { "300s" }
-        $sess = if ($name -match "SESSION-([\d\.]+)") { $Matches[1] } else { "Unknown" }
-        $temp = if ($name -match "TEMP-([\-\d\.]+C)") { $Matches[1] } else { "-20C" }
-
-        # Numeric exposure value for Flat-Dark classification
-        $expNum = [double]($expStr -replace 's', '')
-
-        if ($name -match "masterFlat") {
-            $targetSub = "Master\flats\$telSetup\$sess $filt"
-            $newName = "masterFlat_BIN-1_${res}_FILTER-${filt}.xisf"
-        }
-        elseif ($name -match "masterDark") {
-            if ($expNum -lt 10) {
-                # Treat this as Flat-Dark (exposure < 10 seconds)
-                $targetSub = "Master\flat-darks\Gain$gain\$temp\$($expNum)s"
-                $newName = "masterDark_BIN-1_${res}_EXPOSURE-$($expNum)s.xisf"
-            } else {
-                # Treat this as a regular Dark
-                $targetSub = "Master\darks\Gain$gain\$temp\$($expNum)s"
-                $newName = "masterDark_BIN-1_${res}_EXPOSURE-$($expNum).00s.xisf"
-            }
-        }
-        elseif ($name -match "masterBias") {
-            $targetSub = "Master\biases\Gain$gain\$temp"
-            $newName = "masterBias_BIN-1_${res}.xisf"
-        }
-
-        if ($targetSub) {
-            $destFolder = Join-Path "$baseZ\$camFull" $targetSub
-            $destFile = Join-Path $destFolder $newName
-
-            if (Test-Path $destFile) {
-                $leftPart = "[EXISTS] $newName".PadRight(50)
-                $fullTarget = Join-Path $camFull $targetSub
-                Write-Host "$leftPart --> $fullTarget" -ForegroundColor Yellow
-            } else {
-                if (!(Test-Path $destFolder)) { New-Item -ItemType Directory -Path $destFolder -Force | Out-Null }
-                Copy-Item -Path $m.FullName -Destination $destFile -Force
-                
-                $leftPart = "[SAVED]  $newName".PadRight(50)
-                $fullTarget = Join-Path $camFull $targetSub
-                Write-Host "$leftPart --> $fullTarget" -ForegroundColor Green
-            }
-        }
+if (-not [string]::IsNullOrWhiteSpace($AstroPhotoRoot)) {
+    if (-not (Test-Path -LiteralPath $AstroPhotoRoot -PathType Container)) {
+        throw "AstroPhoto root folder not found: '$AstroPhotoRoot'."
     }
+    $AstroPhotoRoot = (Resolve-Path -LiteralPath $AstroPhotoRoot -ErrorAction Stop).ProviderPath
+} elseif (Test-AsiToPixProjectMetadataNeedsAstroPhotoRoot -Metadata $metadata) {
+    $AstroPhotoRoot = Resolve-AstroPhotoRoot
 }
 
-Write-Host "`nExport process finished!"
+if (-not [string]::IsNullOrWhiteSpace($AstroPhotoRoot)) {
+    Write-AsiToPixPathConventionWarning -Path $AstroPhotoRoot -Context "AstroPhoto root"
+}
+
+$planParameters = @{
+    Metadata = $metadata
+}
+if (-not [string]::IsNullOrWhiteSpace($AstroPhotoRoot)) {
+    $planParameters.AstroPhotoRoot = $AstroPhotoRoot
+}
+
+$plan = Get-AsiToPixMasterExportPlan @planParameters
+Write-AsiToPixMasterExportPlan -Plan $plan
+
+$applyParameters = @{
+    Plan    = $plan
+    Confirm = $false
+}
+if ($WhatIfPreference) {
+    $applyParameters.WhatIf = $true
+}
+
+$null = Invoke-AsiToPixMasterExportPlan @applyParameters

@@ -12,6 +12,9 @@ Initialize-AsiToPixEnvironment
 $pathsModule = Join-Path $PSScriptRoot "src\AsiToPix.Paths.psm1"
 Import-Module $pathsModule -Force
 
+$projectMetadataModule = Join-Path $PSScriptRoot "src\AsiToPix.ProjectMetadata.psm1"
+Import-Module $projectMetadataModule -Force
+
 function Read-CreateProjectConfirmation {
     param(
         [Parameter(Mandatory = $true)]
@@ -376,12 +379,14 @@ function Copy-CreateProjectDirectory {
 Write-Host "--- ASIAir SMART SCANNER v29 ---" -ForegroundColor Cyan
 
 $baseZ = Resolve-AstroPhotoRoot
+Write-AsiToPixCyrillicPathWarning -Path $baseZ -Context "AstroPhoto root"
 
 # 1. AUTO-DETECT
 $inputPath = (Read-Host "Paste path to lights folder (or any .fit file inside)").Trim('"')
 
 # If a file path was given, use its parent folder
 if ($inputPath -match '\.\w+$') { $inputPath = Split-Path $inputPath -Parent }
+Write-AsiToPixCyrillicPathWarning -Path $inputPath -Context "input path"
 
 # Parse the path for project metadata
 if ($inputPath -match 'ASIAir\\(?<obj>[^\\]+)\\(?<season>[^\\]+)\\(?<tel>.*?) @ (?<cam>ASI\d+[^\\]*)\\Good\\[^\\]+') {
@@ -437,6 +442,7 @@ if (-not [string]::IsNullOrWhiteSpace($defaultProjectMatch.MatchedName)) {
 }
 $projectPathInput = Confirm-Param "Project" $defaultProjectPath
 $projectPath = Resolve-CreateProjectPath -ProjectPath $projectPathInput -ProcessingRoot $processingRoot
+Write-AsiToPixCyrillicPathWarning -Path $projectPath -Context "project path"
 if ($projectPath -ne $projectPathInput) {
     Write-Host "  Project path resolved to: $projectPath" -ForegroundColor DarkGray
 }
@@ -501,38 +507,411 @@ function Get-FilterMap($rawFilt, $camType) {
     }
 }
 
+function Get-CreateProjectDuplicateCalibrationKey {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$PendingLink
+    )
+
+    if ($PendingLink.Type -notin @("Biases", "Darks", "Flats", "FlatDarks")) {
+        return $null
+    }
+
+    return "$($PendingLink.Type)|$($PendingLink.Src)"
+}
+
+function Write-CreateProjectDuplicateCalibrationWarning {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$PendingLink
+    )
+
+    $duplicateGroups = @(
+        $PendingLink |
+            Where-Object {
+                $_.Type -in @("Biases", "Darks", "Flats", "FlatDarks") -and
+                $_.Display -notlike "Master\*"
+            } |
+            Group-Object -Property { Get-CreateProjectDuplicateCalibrationKey -PendingLink $_ } |
+            Where-Object { $_.Count -gt 1 }
+    )
+
+    if ($duplicateGroups.Count -eq 0) {
+        return
+    }
+
+    Write-Host "`n[!] Repeated Source calibration folders detected." -ForegroundColor Yellow
+    Write-Host "    Full WBPP tags are kept, so WBPP may compute identical masters more than once." -ForegroundColor Gray
+    foreach ($group in $duplicateGroups) {
+        $first = $group.Group[0]
+        Write-Host "    [$($first.Type)] $($group.Count)x <-- $($first.Display)" -ForegroundColor Yellow
+        Write-Host "      Source: $($first.Src)" -ForegroundColor DarkGray
+        foreach ($tag in @($group.Group | Select-Object -ExpandProperty Tag -Unique | Select-Object -First 6)) {
+            Write-Host "      Tag: $tag" -ForegroundColor DarkGray
+        }
+        if (($group.Group | Select-Object -ExpandProperty Tag -Unique).Count -gt 6) {
+            Write-Host "      ..." -ForegroundColor DarkGray
+        }
+    }
+
+    Write-Host "    Recommendation:" -ForegroundColor Cyan
+    Write-Host "      1. Run WBPP once on the unique calibration set to produce masters." -ForegroundColor White
+    Write-Host "      2. Run ExportMasters.ps1 to copy those masters into Calibration." -ForegroundColor White
+    Write-Host "      3. Recreate the project; CreateProject.ps1 should then use Master calibration folders." -ForegroundColor White
+}
+
+function ConvertTo-CreateProjectDate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DateText
+    )
+
+    foreach ($format in @('yy.MM.dd', 'dd.MM.yy', 'dd.MM.yyyy')) {
+        try {
+            $parsedDate = [datetime]::ParseExact(
+                $DateText,
+                $format,
+                [System.Globalization.CultureInfo]::InvariantCulture
+            )
+            if ($parsedDate.Year -lt 2000) {
+                $parsedDate = $parsedDate.AddYears(100)
+            }
+
+            return $parsedDate.Date
+        } catch {
+            continue
+        }
+    }
+
+    return $null
+}
+
+function Get-CreateProjectNightDate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [datetime]$CapturedAt
+    )
+
+    $nightDate = $CapturedAt.Date
+    if ($CapturedAt.Hour -lt 12) {
+        $nightDate = $nightDate.AddDays(-1)
+    }
+
+    return $nightDate
+}
+
+function Get-CreateProjectDateFromFileName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FileName
+    )
+
+    if ($FileName -match '_(?<stamp>\d{8}-\d{6})(?:_|$)') {
+        $capturedAt = [datetime]::ParseExact(
+            $Matches["stamp"],
+            "yyyyMMdd-HHmmss",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+
+        return Get-CreateProjectNightDate -CapturedAt $capturedAt
+    }
+
+    return $null
+}
+
+function Get-CreateProjectDateFromPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $dateMatches = [regex]::Matches($Path, '(?<!\d)(\d{2}\.\d{2}\.\d{2,4})(?!\d)')
+    if ($dateMatches.Count -gt 0) {
+        return ConvertTo-CreateProjectDate -DateText $dateMatches[$dateMatches.Count - 1].Groups[1].Value
+    }
+
+    $monthMatches = [regex]::Matches($Path, '(?<!\d)(\d{2}\.\d{2})(?![.\d])')
+    if ($monthMatches.Count -gt 0) {
+        $monthDate = ConvertTo-CreateProjectDate -DateText "$($monthMatches[$monthMatches.Count - 1].Groups[1].Value).01"
+        if ($null -ne $monthDate) {
+            return $monthDate
+        }
+    }
+
+    return $null
+}
+
+function Test-CreateProjectPathHasMonthDate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$SessionDate
+    )
+
+    $dateMatches = [regex]::Matches($Path, '(?<!\d)(\d{2}\.\d{2}\.\d{2,4})(?!\d)')
+    if ($dateMatches.Count -gt 0) {
+        return $false
+    }
+
+    $monthMatches = [regex]::Matches($Path, '(?<!\d)(\d{2}\.\d{2})(?![.\d])')
+    foreach ($monthMatch in $monthMatches) {
+        $monthDate = ConvertTo-CreateProjectDate -DateText "$($monthMatch.Groups[1].Value).01"
+        if ($null -ne $monthDate -and
+            $monthDate.Year -eq $SessionDate.Year -and
+            $monthDate.Month -eq $SessionDate.Month) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-CreateProjectDateDiff {
+    param(
+        $CalibrationDate,
+
+        $SessionDate,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CalibrationPath
+    )
+
+    if ($null -eq $CalibrationDate -or $null -eq $SessionDate) {
+        return 999999
+    }
+
+    if (Test-CreateProjectPathHasMonthDate -Path $CalibrationPath -SessionDate $SessionDate) {
+        return 0
+    }
+
+    return [Math]::Abs((New-TimeSpan -Start $CalibrationDate -End $SessionDate).Days)
+}
+
+function ConvertTo-CreateProjectExposureNumber {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ExposureText
+    )
+
+    return ($ExposureText -replace '[^0-9\.]', '').Replace(".0", "")
+}
+
+function Get-CreateProjectCalibrationFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [int]$First = 0
+    )
+
+    $files = Get-ChildItem -LiteralPath $Path -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '\.(fits?|xisf)(\.gz)?$' }
+
+    if ($First -gt 0) {
+        return @($files | Select-Object -First $First)
+    }
+
+    return @($files)
+}
+
+function Test-CreateProjectExposureMatch {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.DirectoryInfo]$Directory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExposureValue
+    )
+
+    $cleanExp = ConvertTo-CreateProjectExposureNumber -ExposureText $ExposureValue
+    $pathParts = $Directory.FullName -split '[\\/]'
+    foreach ($pathPart in $pathParts) {
+        $folderExp = ConvertTo-CreateProjectExposureNumber -ExposureText $pathPart
+        if ($folderExp -eq $cleanExp -or $pathPart -like "$cleanExp*") {
+            return $true
+        }
+    }
+
+    $files = @(Get-CreateProjectCalibrationFile -Path $Directory.FullName -First 10)
+    foreach ($file in $files) {
+        if ($file.Name -match '_(?<exp>\d+(?:\.\d+)?)(?:m?s)_') {
+            $fileExp = ConvertTo-CreateProjectExposureNumber -ExposureText $Matches["exp"]
+            if ($fileExp -eq $cleanExp) {
+                return $true
+            }
+        }
+    }
+
+    return $false
+}
+
+function Get-CreateProjectCalibrationDate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        $SessionDate = $null
+    )
+
+    $fileDates = @(Get-CreateProjectCalibrationFile -Path $Path -First 20 |
+        ForEach-Object {
+            Get-CreateProjectDateFromFileName -FileName $_.Name
+        } |
+        Where-Object { $null -ne $_ })
+
+    if ($fileDates.Count -gt 0) {
+        if ($null -ne $SessionDate) {
+            return @($fileDates | Sort-Object @{ Expression = { [Math]::Abs((New-TimeSpan -Start $_ -End $SessionDate).Days) } })[0]
+        }
+
+        return $fileDates[0]
+    }
+
+    return Get-CreateProjectDateFromPath -Path $Path
+}
+
+function ConvertTo-CreateProjectTemperatureFolderKey {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FolderName
+    )
+
+    $normalized = $FolderName.Trim()
+    $normalized = $normalized.Replace([string][char]0x0421, "C")
+    $normalized = $normalized.Replace([string][char]0x0441, "C")
+
+    return $normalized.ToUpperInvariant()
+}
+
+function Get-CreateProjectTemperatureDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$GainRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TargetTempFolder
+    )
+
+    $targetKey = ConvertTo-CreateProjectTemperatureFolderKey -FolderName $TargetTempFolder
+    if (-not (Test-Path -LiteralPath $GainRoot -PathType Container)) {
+        return @()
+    }
+
+    $matchingDirectories = @(Get-ChildItem -LiteralPath $GainRoot -Directory -ErrorAction Stop |
+        Where-Object {
+            (ConvertTo-CreateProjectTemperatureFolderKey -FolderName $_.Name) -eq $targetKey
+        })
+    foreach ($directory in $matchingDirectories) {
+        Write-AsiToPixCyrillicPathWarning -Path $directory.FullName -Context "calibration temperature folder"
+    }
+
+    return $matchingDirectories
+}
+
+function Write-CreateProjectCalibrationDirectoryWarning {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RootPath
+    )
+
+    if (-not (Test-Path -LiteralPath $RootPath -PathType Container)) {
+        return
+    }
+
+    if (-not (Get-Variable -Name CreateProjectScannedCalibrationRoots -Scope Script -ErrorAction SilentlyContinue)) {
+        $script:CreateProjectScannedCalibrationRoots = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+        )
+    }
+
+    $resolvedRootPath = (Resolve-Path -LiteralPath $RootPath).ProviderPath
+    if (-not $script:CreateProjectScannedCalibrationRoots.Add($resolvedRootPath)) {
+        return
+    }
+
+    Write-AsiToPixPathConventionWarning -Path $resolvedRootPath -Context "calibration root"
+    Get-ChildItem -LiteralPath $resolvedRootPath -Directory -Recurse -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            Write-AsiToPixPathConventionWarning -Path $_.FullName -Context "calibration folder"
+        }
+}
+
 # Calibration Path Helper - $cb = calibration base for this session's camera
-function Get-CalibPath($type, $gain, $rawTemp, $expValue, $cb) {
+function Get-CalibPath($type, $gain, $rawTemp, $expValue, $cb, $sessionDate) {
     $sub = switch($type) { "Darks" {"darks"} "Biases" {"biases"} "FlatDarks" {"flat-darks"} }
     $numTemp = [double]($rawTemp -replace '[^-\d\.]', '')
     $targetTempFolder = "$([Math]::Round($numTemp / 5.0) * 5)C"
+    $sessionDateObj = if ($sessionDate) { ConvertTo-CreateProjectDate -DateText $sessionDate } else { $null }
+    $candidates = @()
     
     foreach ($m in @("Master", "Source")) {
-        $base = Join-Path -Path $cb -ChildPath "$m\$sub\Gain$gain\$targetTempFolder"
-        if (Test-Path -LiteralPath $base -PathType Container) {
-            $finalPath = $base
-            if ($expValue) {
-                $cleanExp = ($expValue -replace '[^0-9\.]', '').Replace(".0","")
-                # Improved exposure folder matching - exact match first, then prefix match
-                $expDir = Get-ChildItem -LiteralPath $base -Directory -ErrorAction Stop | Where-Object {
-                    $folderExp = ($_.Name -replace '[^0-9\.]', '').Replace(".0","")
-                    $folderExp -eq $cleanExp 
-                } | Select-Object -First 1
-                
-                # If no exact match found, try prefix match (for backwards compatibility)
-                if (-not $expDir) {
-                    $expDir = Get-ChildItem -LiteralPath $base -Directory -ErrorAction Stop | Where-Object {
-                        $_.Name -like "$cleanExp*" 
-                    } | Sort-Object Name | Select-Object -First 1
+        $kindRoot = Join-Path -Path $cb -ChildPath "$m\$sub"
+        Write-CreateProjectCalibrationDirectoryWarning -RootPath $kindRoot
+        $gainRoot = Join-Path -Path $kindRoot -ChildPath "Gain$gain"
+        $baseDirs = @(Get-CreateProjectTemperatureDirectory -GainRoot $gainRoot -TargetTempFolder $targetTempFolder)
+        foreach ($baseDir in $baseDirs) {
+            $base = $baseDir.FullName
+            $candidateDirs = @()
+            $candidateDirs += $baseDir
+            $candidateDirs += @(Get-ChildItem -LiteralPath $base -Directory -Recurse -ErrorAction Stop)
+
+            foreach ($dir in $candidateDirs) {
+                $hasFiles = [bool](Get-CreateProjectCalibrationFile -Path $dir.FullName -First 1)
+                if (-not $hasFiles -and $dir.FullName -ne $base) {
+                    continue
                 }
-                
-                if ($expDir) { $finalPath = $expDir.FullName } else { continue }
+
+                if ($expValue -and -not (Test-CreateProjectExposureMatch -Directory $dir -ExposureValue $expValue)) {
+                    continue
+                }
+
+                if (-not $expValue -and -not $hasFiles) {
+                    continue
+                }
+
+                $calibDate = Get-CreateProjectCalibrationDate -Path $dir.FullName -SessionDate $sessionDateObj
+                $dateDiff = Get-CreateProjectDateDiff `
+                    -CalibrationDate $calibDate `
+                    -SessionDate $sessionDateObj `
+                    -CalibrationPath $dir.FullName
+
+                $modePriority = if ($m -eq "Master") { 0 } else { 1 }
+                $display = $dir.FullName.Replace($cb, "").TrimStart("\")
+                $candidates += [PSCustomObject]@{
+                    Path         = $dir.FullName
+                    Mode         = $m
+                    Display      = $display
+                    Date         = $calibDate
+                    DateDiff     = $dateDiff
+                    ModePriority = $modePriority
+                }
             }
-            $display = $finalPath.Replace($cb, "").TrimStart("\")
-            return @{Path=$finalPath; Mode=$m; Display="$display"}
         }
     }
-    return $null
+
+    if ($candidates.Count -eq 0) {
+        return $null
+    }
+
+    $datedCandidates = @($candidates | Where-Object { $null -ne $_.Date })
+    if ($datedCandidates.Count -gt 0 -and $sessionDateObj) {
+        $best = $datedCandidates |
+            Sort-Object DateDiff, ModePriority, Display |
+            Select-Object -First 1
+    } else {
+        $best = $candidates |
+            Sort-Object ModePriority, Display |
+            Select-Object -First 1
+    }
+
+    return @{
+        Path    = $best.Path
+        Mode    = $best.Mode
+        Display = $best.Display
+    }
 }
 
 function AngleDiff180($a, $b) {
@@ -611,10 +990,22 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
         Write-Host "  [$sessionCamFull/$sessionCamType] $sessionDate | Filter: $rawFilt -> $filt | Target: $targetGrp | Angle: $angDisp" -ForegroundColor Green
 
         $roundT = "$([Math]::Round([double]$curTemp / 5.0) * 5)C"
-        $sTag = "Session_${sessionDate}_Filter_${filt}_Target_${targetGrp}_Gain_${curGain}_Exp_${curExp}_Cam_${sessionCamFull}"
+        $sTag = "Session_${sessionDate}_Filter_${filt}_Target_${targetGrp}_Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Cam_${sessionCamFull}"
         $cTag = "Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Cam_${sessionCamFull}"
 
-        $pendingLinks += [PSCustomObject]@{ Type="Lights"; Tag=$sTag; Src=$dFolder.FullName; Display="Good\$($fFolder.Name)\$sessionDate"; Cam=$sessionCamFull }
+        $pendingLinks += [PSCustomObject]@{
+            Type        = "Lights"
+            Tag         = $sTag
+            Src         = $dFolder.FullName
+            Display     = "Good\$($fFolder.Name)\$sessionDate"
+            Cam         = $sessionCamFull
+            Gain        = $curGain
+            Temperature = $roundT
+            Exposure    = $curExp
+            Filter      = $filt
+            Session     = $sessionDate
+            Target      = $targetGrp
+        }
 
         # --- FLATS SEARCH ---
         # Build list of all raw filter names that map to the same normalized filter,
@@ -692,6 +1083,7 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
                 Get-ChildItem -LiteralPath $p -Directory -ErrorAction Stop | ForEach-Object {
                     $item = $_ | Select-Object -Property Name, FullName
                     $folderName = $item.Name
+                    Write-AsiToPixPathConventionWarning -Path $item.FullName -Context "flat calibration folder"
                     $flatFilt = $null; $ang = $null; $warn = $false
                     if ($folderName.Length -lt 8) {
                         $warn = $true
@@ -1107,7 +1499,20 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
         if ($fFound) {
             # Clean leading slash for flats display too
             $fDisp = "$foundIn\flats\$telSetup\$($fFound.Name)"
-            $pendingLinks += [PSCustomObject]@{ Type="Flats"; Tag=$sTag; Src=$fFound.FullName; Display=$fDisp; Cam=$sessionCamFull }
+            $flatTag = "Session_${sessionDate}_Filter_${filt}_Target_${targetGrp}_Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Cam_${sessionCamFull}"
+            $pendingLinks += [PSCustomObject]@{
+                Type        = "Flats"
+                Tag         = $flatTag
+                Src         = $fFound.FullName
+                Display     = $fDisp
+                Cam         = $sessionCamFull
+                Gain        = $curGain
+                Temperature = $roundT
+                Exposure    = $curExp
+                Filter      = $filt
+                Session     = $sessionDate
+                Target      = $targetGrp
+            }
 
             # Check for potential keyword conflicts in flat files
             $flatFiles = Get-ChildItem -LiteralPath $fFound.FullName -Filter "*.fit*" -ErrorAction SilentlyContinue
@@ -1131,10 +1536,22 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
             $fSample = Get-ChildItem -LiteralPath $fFound.FullName -Filter "*.fit*" -ErrorAction Stop | Select-Object -First 1
             if ($fSample -and ($fSample.Name -match "_(\d+\.?\d*)m?s_")) {
                 $fdExp = $Matches[1] + "s"
-                $fd = Get-CalibPath "FlatDarks" $curGain $curTemp $fdExp $sessionCalibBase
+                $fd = Get-CalibPath "FlatDarks" $curGain $curTemp $fdExp $sessionCalibBase $sessionDate
                 if ($fd) {
-                $fdTag = "Exp_${fdExp}_Gain_${curGain}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
-                    $pendingLinks += [PSCustomObject]@{ Type="FlatDarks"; Tag=$fdTag; Src=$fd.Path; Display=$fd.Display; Cam=$sessionCamFull }
+                    $fdTag = "Exp_${fdExp}_Gain_${curGain}_Temp_${roundT}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
+                    $pendingLinks += [PSCustomObject]@{
+                        Type        = "FlatDarks"
+                        Tag         = $fdTag
+                        Src         = $fd.Path
+                        Display     = $fd.Display
+                        Cam         = $sessionCamFull
+                        Gain        = $curGain
+                        Temperature = $roundT
+                        Exposure    = $fdExp
+                        Filter      = $filt
+                        Session     = $sessionDate
+                        Target      = $targetGrp
+                    }
                     # Check for potential keyword conflicts in flat-dark files
                     $flatDarkFiles = Get-ChildItem -LiteralPath $fd.Path -Filter "*.fit*" -ErrorAction SilentlyContinue
                     if ($flatDarkFiles) {
@@ -1154,15 +1571,41 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
         }
 
         # --- DARKS & BIAS ---
-        # Add Target and Filter to calibration frame symlink names
         $dTag = "Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
         $bTag = "Gain_${curGain}_Temp_${roundT}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
 
-        $d = Get-CalibPath "Darks" $curGain $curTemp $curExp $sessionCalibBase
-        if ($d) { $pendingLinks += [PSCustomObject]@{ Type="Darks"; Tag=$dTag; Src=$d.Path; Display=$d.Display; Cam=$sessionCamFull } }
+        $d = Get-CalibPath "Darks" $curGain $curTemp $curExp $sessionCalibBase $sessionDate
+        if ($d) {
+            $pendingLinks += [PSCustomObject]@{
+                Type        = "Darks"
+                Tag         = $dTag
+                Src         = $d.Path
+                Display     = $d.Display
+                Cam         = $sessionCamFull
+                Gain        = $curGain
+                Temperature = $roundT
+                Exposure    = $curExp
+                Filter      = $filt
+                Session     = $sessionDate
+                Target      = $targetGrp
+            }
+        }
         
-        $b = Get-CalibPath "Biases" $curGain $curTemp $null $sessionCalibBase
-        if ($b) { $pendingLinks += [PSCustomObject]@{ Type="Biases"; Tag=$bTag; Src=$b.Path; Display=$b.Display; Cam=$sessionCamFull } }
+        $b = Get-CalibPath "Biases" $curGain $curTemp $null $sessionCalibBase $sessionDate
+        if ($b) {
+            $pendingLinks += [PSCustomObject]@{
+                Type        = "Biases"
+                Tag         = $bTag
+                Src         = $b.Path
+                Display     = $b.Display
+                Cam         = $sessionCamFull
+                Gain        = $curGain
+                Temperature = $roundT
+                Filter      = $filt
+                Session     = $sessionDate
+                Target      = $targetGrp
+            }
+        }
     }
 }
 
@@ -1191,6 +1634,8 @@ $pendingLinks | Group-Object Type | ForEach-Object {
         Write-Host " |- $($_.Tag.PadRight(65)) <-- $($_.Display)$camPart" -ForegroundColor Gray
     }
 }
+
+Write-CreateProjectDuplicateCalibrationWarning -PendingLink $pendingLinks
 
 # --- FINAL DEBUG TABLE (commented out for clarity) ---
 <#
@@ -1231,7 +1676,8 @@ if ($pendingLinks.Count -gt 0) {
         if (Test-CreateProjectSymbolicLinkCreation -ScratchRoot $sourcePath) {
             Write-Host "`nCreating symlinks..." -ForegroundColor Green
             foreach ($l in $pendingLinks) {
-                $targetTypePath = Join-Path -Path $sourcePath -ChildPath $l.Type
+                $sourceFolderName = Get-AsiToPixProjectSourceFolderName -Type $l.Type
+                $targetTypePath = Join-Path -Path $sourcePath -ChildPath $sourceFolderName
                 $target = Join-Path -Path $targetTypePath -ChildPath $l.Tag
                 New-CreateProjectSymbolicLink -Path $target -Target $l.Src
             }
@@ -1256,7 +1702,8 @@ if ($pendingLinks.Count -gt 0) {
             $targetsForSrc = $pendingLinks | Where-Object { $_.Src -eq $l.Src }
             
             foreach ($targetEntry in $targetsForSrc) {
-                $targetTypePath = Join-Path -Path $sourcePath -ChildPath $targetEntry.Type
+                $sourceFolderName = Get-AsiToPixProjectSourceFolderName -Type $targetEntry.Type
+                $targetTypePath = Join-Path -Path $sourcePath -ChildPath $sourceFolderName
                 $targetPath = Join-Path -Path $targetTypePath -ChildPath $targetEntry.Tag
                 Write-Host "Copying from $($l.Src) to $targetPath" -ForegroundColor DarkGray
                 Copy-CreateProjectDirectory -Source $l.Src -Destination $targetPath
@@ -1288,12 +1735,17 @@ Write-Host "- Alternative: Use WBPP's 'Smart naming override' option and clear/r
 # --- After scan completion and camMap construction ---
 
 $meta = @{
-    Object = $astroObj
-    Season = $season
-    Scope = $telSetup
-    GoodPath = $inputPath
-    PixPath = $pixPath
-    Cameras = @()
+    SchemaVersion     = 2
+    Object            = $astroObj
+    Season            = $season
+    Scope             = $telSetup
+    GoodPath          = $inputPath
+    ProjectRoot       = $setupRoot
+    ProjectSourcePath = $sourcePath
+    PixPath           = $pixPath
+    WbppMasterPath    = Join-Path -Path $pixPath -ChildPath "master"
+    Cameras           = @()
+    CalibrationSources = @()
 }
 foreach ($cam in $camMap.Keys) {
     $entry = $camMap[$cam]
@@ -1315,6 +1767,12 @@ foreach ($cam in $camMap.Keys) {
         CalibrationFolders = $calibFolders
     }
 }
+
+$meta.CalibrationSources = @(
+    ConvertTo-AsiToPixCalibrationSourceMetadata `
+        -PendingLink $pendingLinks `
+        -CameraMetadata $meta.Cameras
+)
 
 # Save JSON next to Pix/Good
 $metaPath = Join-Path (Split-Path $pixPath -Parent) "project_meta.json"

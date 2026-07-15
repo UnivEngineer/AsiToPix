@@ -14,7 +14,7 @@ Main scripts:
 ## Environment
 
 - Target platform: Windows.
-- Shell: PowerShell 7.
+- Shell: PowerShell 5 and higher.
 - Source files may reside on different Windows volumes, including network drives.
 - Paths may contain spaces, Unicode characters, but not Cyrillic characters.
 - The scripts create symbolic links and must preserve the original files.

@@ -17,8 +17,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $pathsModule = Join-Path -Path $PSScriptRoot -ChildPath "src\AsiToPix.Paths.psm1"
+$environmentModule = Join-Path -Path $PSScriptRoot -ChildPath "src\AsiToPix.Environment.psm1"
 $importModule = Join-Path -Path $PSScriptRoot -ChildPath "src\AsiToPix.ImportSession.psm1"
 
+Import-Module $environmentModule -Force
 Import-Module $importModule -Force
 
 Write-Host "--- ASIAir SESSION IMPORT ---" -ForegroundColor Cyan
@@ -30,6 +32,7 @@ if ([string]::IsNullOrWhiteSpace($SourcePath)) {
 if ($SourcePath -match '\.fits?(\.gz)?$') {
     $SourcePath = Split-Path -Path $SourcePath -Parent
 }
+Write-AsiToPixCyrillicPathWarning -Path $SourcePath -Context "source path"
 
 if (-not (Test-Path -LiteralPath $SourcePath -PathType Container)) {
     Write-Host "[!] Source folder not found: $SourcePath" -ForegroundColor Red
@@ -40,6 +43,7 @@ if ([string]::IsNullOrWhiteSpace($AstroPhotoRoot)) {
     Import-Module $pathsModule -Force
     $AstroPhotoRoot = Resolve-AstroPhotoRoot
 }
+Write-AsiToPixCyrillicPathWarning -Path $AstroPhotoRoot -Context "AstroPhoto root"
 
 if (-not (Test-Path -LiteralPath $AstroPhotoRoot -PathType Container)) {
     Write-Host "[!] AstroPhoto root not found: $AstroPhotoRoot" -ForegroundColor Red

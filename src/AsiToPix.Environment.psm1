@@ -1,4 +1,173 @@
-﻿function Test-AsiToPixAdministrator {
+function Test-AsiToPixPathHasCyrillicC {
+    param(
+        [AllowEmptyString()]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+
+    return $Path.Contains([string][char]0x0421) -or $Path.Contains([string][char]0x0441)
+}
+
+function ConvertTo-AsiToPixLatinCPath {
+    param(
+        [AllowEmptyString()]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $Path
+    }
+
+    return $Path.Replace([string][char]0x0421, "C").Replace([string][char]0x0441, "c")
+}
+
+function Get-AsiToPixCanonicalNumericText {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    $trimmedValue = $Value.Trim()
+    if ($trimmedValue -match '^-?\d+\.0+$') {
+        return ($trimmedValue -replace '\.0+$', '')
+    }
+
+    return $trimmedValue
+}
+
+function Get-AsiToPixPathConventionIssue {
+    param(
+        [AllowEmptyString()]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return @()
+    }
+
+    $issues = @()
+    if (Test-AsiToPixPathHasCyrillicC -Path $Path) {
+        $issues += [PSCustomObject]@{
+            Kind       = "CyrillicC"
+            Message    = "Possible Cyrillic C typo."
+            Segment    = $null
+            Suggestion = ConvertTo-AsiToPixLatinCPath -Path $Path
+        }
+    }
+
+    $normalizedPath = ConvertTo-AsiToPixLatinCPath -Path $Path
+    $escapedSeparator = '[\\/]'
+    $flatCalibrationPattern = "Calibration${escapedSeparator}[^\\/]+${escapedSeparator}(?:Master|Source)${escapedSeparator}flats(?:${escapedSeparator}|$)"
+    $isFlatCalibrationPath = $normalizedPath -match $flatCalibrationPattern
+
+    foreach ($segment in ($Path -split '[\\/]')) {
+        if ([string]::IsNullOrWhiteSpace($segment)) {
+            continue
+        }
+
+        $suggestedSegment = $null
+        $message = $null
+        if ($segment -match '^(?<value>-?\d+(?:\.\d+)?)\s+[Cc]$') {
+            $suggestedSegment = "$(Get-AsiToPixCanonicalNumericText -Value $Matches['value'])C"
+            $message = "Temperature folder should not contain a space before C."
+        } elseif (-not $isFlatCalibrationPath -and
+            $segment -match '^(?<value>\d+(?:\.\d+)?)\s*(?<unit>s|sec|secs|second|seconds)$') {
+            $suggestedSegment = "$(Get-AsiToPixCanonicalNumericText -Value $Matches['value'])sec"
+            $message = "Exposure folder should use the canonical sec suffix."
+        } elseif ($segment -match '^(?<value>\d+(?:\.\d+)?)\s*(?<unit>deg|degree|degrees)$') {
+            $suggestedSegment = "$(Get-AsiToPixCanonicalNumericText -Value $Matches['value'])deg"
+            $message = "Angle token should use the canonical deg suffix without spaces."
+        } elseif ($segment -match '(?<token>(?<value>-?\d+(?:\.\d+)?)\s+[Cc])\b') {
+            $suggestedToken = "$(Get-AsiToPixCanonicalNumericText -Value $Matches['value'])C"
+            $suggestedSegment = $segment.Replace($Matches["token"], $suggestedToken)
+            $message = "Temperature token should not contain a space before C."
+        } elseif (-not $isFlatCalibrationPath -and
+            $segment -match '(?<token>(?<value>\d+(?:\.\d+)?)\s+(?:s|sec|secs|second|seconds))\b') {
+            $suggestedToken = "$(Get-AsiToPixCanonicalNumericText -Value $Matches['value'])sec"
+            $suggestedSegment = $segment.Replace($Matches["token"], $suggestedToken)
+            $message = "Exposure token should use the canonical sec suffix."
+        } elseif ($segment -match '(?<token>(?<value>\d+(?:\.\d+)?)\s+(?:deg|degree|degrees))\b') {
+            $suggestedToken = "$(Get-AsiToPixCanonicalNumericText -Value $Matches['value'])deg"
+            $suggestedSegment = $segment.Replace($Matches["token"], $suggestedToken)
+            $message = "Angle token should use the canonical deg suffix without spaces."
+        }
+
+        if ($suggestedSegment -and $suggestedSegment -cne $segment) {
+            $issues += [PSCustomObject]@{
+                Kind       = "FolderToken"
+                Message    = $message
+                Segment    = $segment
+                Suggestion = $Path.Replace($segment, $suggestedSegment)
+            }
+        }
+    }
+
+    $calibrationPattern = "Calibration${escapedSeparator}[^\\/]+${escapedSeparator}(?<mode>Master|Source)${escapedSeparator}(?<kind>darks|biases|flat-darks)${escapedSeparator}(?<next>[^\\/]+)"
+    if ($normalizedPath -match $calibrationPattern -and $Matches["next"] -notmatch '^gain\d+$') {
+        $mode = $Matches["mode"]
+        $kind = $Matches["kind"]
+        $next = $Matches["next"]
+        $gain = if ($normalizedPath -match '(?i)(?:^|[_\\/])gain(?<gain>\d+)(?:[_\\/]|$)') { $Matches["gain"] } else { "<gain>" }
+        $legacyPart = "$mode\$kind\$next"
+        $suggestedPart = "$mode\$kind\Gain$gain\$next"
+        $issues += [PSCustomObject]@{
+            Kind       = "LegacyCalibrationLayout"
+            Message    = "Legacy calibration layout: missing gain folder after $mode\$kind."
+            Segment    = $legacyPart
+            Suggestion = $normalizedPath.Replace($legacyPart, $suggestedPart)
+        }
+    }
+
+    return @($issues)
+}
+
+function Write-AsiToPixPathConventionWarning {
+    param(
+        [AllowEmptyString()]
+        [string]$Path,
+
+        [string]$Context = "Path"
+    )
+
+    $issues = @(Get-AsiToPixPathConventionIssue -Path $Path)
+    if ($issues.Count -eq 0) {
+        return
+    }
+
+    if (-not (Get-Variable -Name AsiToPixPathConventionWarnings -Scope Script -ErrorAction SilentlyContinue)) {
+        $script:AsiToPixPathConventionWarnings = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+        )
+    }
+
+    foreach ($issue in $issues) {
+        $warningKey = "$Context|$($issue.Kind)|$Path|$($issue.Suggestion)"
+        if (-not $script:AsiToPixPathConventionWarnings.Add($warningKey)) {
+            continue
+        }
+
+        Write-Host "[!] $($issue.Message) ${Context}: $Path" -ForegroundColor Yellow
+        if ($issue.Suggestion -and $issue.Suggestion -ne $Path) {
+            Write-Host "    Suggested spelling/structure: $($issue.Suggestion)" -ForegroundColor DarkGray
+        }
+    }
+}
+
+function Write-AsiToPixCyrillicPathWarning {
+    param(
+        [AllowEmptyString()]
+        [string]$Path,
+
+        [string]$Context = "Path"
+    )
+
+    Write-AsiToPixPathConventionWarning -Path $Path -Context $Context
+}
+
+function Test-AsiToPixAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)

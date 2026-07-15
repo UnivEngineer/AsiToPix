@@ -53,6 +53,11 @@ Describe "Import report" {
         Format-AsiToPixIntegrationTime -Seconds 93784.5 | Should Be "26h 03m 4.5s"
     }
 
+    It "formats seconds as rounded H:MM" {
+        Format-AsiToPixHourMinute -Seconds 19260 | Should Be "5:21"
+        Format-AsiToPixHourMinute -Seconds 90 | Should Be "0:02"
+    }
+
     It "builds a tab-separated report from an Import tree" {
         $objectPath = Join-Path -Path $TestDrive -ChildPath "APO120 @ 0.8x\Light\47 Tuc"
         New-Item -ItemType Directory -Path $objectPath -Force | Out-Null
@@ -73,6 +78,12 @@ Describe "Import report" {
         $report = @(Get-AsiToPixImportReport -ImportPath $TestDrive)
         $report[0].FrameCount | Should Be 3
         $report[0].IntegrationSeconds | Should Be ([decimal]660)
+        $report[0].LSeconds | Should Be ([decimal]660)
+
+        $summaryLines = @(Get-AsiToPixIntegrationSummaryPrettyLine -Report $report)
+        $summaryLines[0] | Should Be "APO120  0.8x"
+        $summaryLines[1] | Should Be "Object  L"
+        $summaryLines[2] | Should Be "47 Tuc  0:11"
     }
 
     It "aligns columns using the longest value" {

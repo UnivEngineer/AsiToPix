@@ -84,3 +84,19 @@ $totalDuration = Format-AsiToPixIntegrationTime -Seconds $totalSeconds
 Write-Host "[DONE] Total integration: " -ForegroundColor Green -NoNewline
 Write-Host $totalDuration -ForegroundColor Yellow -NoNewline
 Write-Host " ($totalFrames subs)" -ForegroundColor Gray
+
+Write-Host "`n--- INTEGRATION BY OBJECT ---" -ForegroundColor Cyan
+$expectSetup = $true
+foreach ($line in Get-AsiToPixIntegrationSummaryPrettyLine -Report $report) {
+    if ([string]::IsNullOrEmpty($line)) {
+        Write-Host ""
+        $expectSetup = $true
+    } elseif ($expectSetup) {
+        Write-Host $line -ForegroundColor Yellow
+        $expectSetup = $false
+    } elseif ($line -match '^Object\s') {
+        Write-Host $line -ForegroundColor Cyan
+    } else {
+        Write-Host $line -ForegroundColor Gray
+    }
+}

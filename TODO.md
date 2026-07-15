@@ -72,6 +72,7 @@
 - [ ] После каждого изменения показывать `git diff`.
 ## Recent fixes
 
+- [x] `Get-ImportReport.ps1`: add an aligned per-object/filter integration summary in H:MM format.
 - [x] `Get-ImportReport.ps1`: express every exposure group as `(night counts)*exposure` without dividing by the characteristic exposure.
 - [x] `Get-ImportReport.ps1`: group repeated alternate-exposure multipliers across nights to shorten report expressions.
 - [x] `ImportSession.ps1`: require exact catalog identifiers for fuzzy object matching so `M 16` does not match `M 17`.

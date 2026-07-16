@@ -74,4 +74,23 @@ Describe "ImportSession parsing" {
 
         Remove-Item Env:\ASITOPIX_OBJECT_TEST_FOLDER
     }
+
+    It "discovers camera RAW files and detects lens setup from lowercase lights folders" {
+        $rawFolder = Join-Path -Path $TestDrive -ChildPath "Canon EF 200 F2.8 MK2\lights\Rho Oph"
+        $env:ASITOPIX_RAW_TEST_FOLDER = $rawFolder
+        New-Item -ItemType Directory -Path $rawFolder -Force | Out-Null
+        $rawFile = New-Item -ItemType File -Path (Join-Path -Path $rawFolder -ChildPath "A7406786.ARW") -Force
+        $rawFile.LastWriteTime = [datetime]"2026-07-13T01:17:58"
+
+        InModuleScope AsiToPix.ImportSession {
+            $files = @(Get-AsiToPixSourceLightFile -SourcePath $env:ASITOPIX_RAW_TEST_FOLDER)
+
+            $files.Count | Should Be 1
+            $files[0].Name | Should Be "A7406786.ARW"
+            Get-AsiToPixDetectedObject -SourcePath $env:ASITOPIX_RAW_TEST_FOLDER | Should Be "Rho Oph"
+            Get-AsiToPixDetectedTelescope -SourcePath $env:ASITOPIX_RAW_TEST_FOLDER | Should Be "Canon EF 200 F2.8 MK2"
+        }
+
+        Remove-Item Env:\ASITOPIX_RAW_TEST_FOLDER
+    }
 }

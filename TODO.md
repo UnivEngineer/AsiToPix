@@ -72,6 +72,8 @@
 - [ ] После каждого изменения показывать `git diff`.
 ## Recent fixes
 
+- [x] `ImportCalibration.ps1`: import FIT/FITS/ARW bias, dark, and flat frames into canonical camera `Source` calibration trees with interactive RAW metadata, repeat-import detection, unusual-addition warnings, and `-WhatIf` support.
+- [x] `ImportSession.ps1`: support camera RAW light files such as `.ARW`, using the source folder for object/setup and file timestamps for night dates.
 - [x] `Get-ImportReport.ps1`: add an aligned per-object/filter integration summary in H:MM format.
 - [x] `Get-ImportReport.ps1`: express every exposure group as `(night counts)*exposure` without dividing by the characteristic exposure.
 - [x] `Get-ImportReport.ps1`: group repeated alternate-exposure multipliers across nights to shorten report expressions.

@@ -304,6 +304,45 @@ function Get-AsiToPixNightDate {
     return $nightStart.ToString("yy.MM.dd", [System.Globalization.CultureInfo]::InvariantCulture)
 }
 
+function Test-AsiToPixRawFileName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FileName
+    )
+
+    $rawExtensions = @(
+        ".arw",
+        ".cr2",
+        ".cr3",
+        ".nef",
+        ".nrw",
+        ".raf",
+        ".orf",
+        ".rw2",
+        ".dng",
+        ".pef",
+        ".srw",
+        ".3fr",
+        ".erf",
+        ".kdc",
+        ".mos",
+        ".mrw",
+        ".raw"
+    )
+    $extension = [System.IO.Path]::GetExtension($FileName).ToLowerInvariant()
+
+    return ($rawExtensions -contains $extension)
+}
+
+function Test-AsiToPixSupportedLightFileName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FileName
+    )
+
+    return ($FileName -match '(?i)\.fits?(\.gz)?$' -or (Test-AsiToPixRawFileName -FileName $FileName))
+}
+
 function Get-AsiToPixSetupInfo {
     param(
         [Parameter(Mandatory = $true)]
@@ -338,11 +377,11 @@ function Get-AsiToPixDetectedTelescope {
 
     $current = $directory
     while ($null -ne $current) {
-        if ($current.Name -ieq "Light" -and $null -ne $current.Parent) {
+        if ($current.Name -in @("Light", "Lights") -and $null -ne $current.Parent) {
             return $current.Parent.Name
         }
 
-        if ($null -ne $current.Parent -and $current.Parent.Name -ieq "Light") {
+        if ($null -ne $current.Parent -and $current.Parent.Name -in @("Light", "Lights")) {
             if ($null -ne $current.Parent.Parent) {
                 return $current.Parent.Parent.Name
             }
@@ -372,14 +411,14 @@ function Get-AsiToPixDetectedObject {
     return ""
 }
 
-function Get-AsiToPixFitsFile {
+function Get-AsiToPixSourceLightFile {
     param(
         [Parameter(Mandatory = $true)]
         [string]$SourcePath
     )
 
     return @(Get-ChildItem -LiteralPath $SourcePath -File -Recurse -ErrorAction Stop |
-        Where-Object { $_.Name -match '\.fits?(\.gz)?$' } |
+        Where-Object { Test-AsiToPixSupportedLightFileName -FileName $_.Name } |
         Sort-Object FullName)
 }
 
@@ -520,15 +559,20 @@ function Import-AsiToPixSession {
     $resolvedSourcePath = (Resolve-Path -LiteralPath $SourcePath).ProviderPath
     $resolvedAstroPhotoRoot = (Resolve-Path -LiteralPath $AstroPhotoRoot).ProviderPath
 
-    $files = @(Get-AsiToPixFitsFile -SourcePath $resolvedSourcePath)
+    $files = @(Get-AsiToPixSourceLightFile -SourcePath $resolvedSourcePath)
     if ($files.Count -eq 0) {
-        throw "No FITS files found under source path: $resolvedSourcePath"
+        throw "No supported FITS or RAW light files found under source path: $resolvedSourcePath"
     }
 
     $parsedFiles = foreach ($file in $files) {
         $info = Get-AsiToPixLightFileInfo -FileName $file.Name
-        if ($null -eq $info.CapturedAt) {
-            Write-Host "[!] Skipping file without ASIAir timestamp: $($file.FullName)" -ForegroundColor Yellow
+        $capturedAt = $info.CapturedAt
+        if ($null -eq $capturedAt -and (Test-AsiToPixRawFileName -FileName $file.Name)) {
+            $capturedAt = $file.LastWriteTime
+        }
+
+        if ($null -eq $capturedAt) {
+            Write-Host "[!] Skipping file without importable timestamp: $($file.FullName)" -ForegroundColor Yellow
             continue
         }
 
@@ -537,8 +581,8 @@ function Import-AsiToPixSession {
             ObjectName  = $info.ObjectName
             CameraName  = $info.CameraName
             FilterName  = $info.FilterName
-            CapturedAt  = $info.CapturedAt
-            NightDate   = Get-AsiToPixNightDate -CapturedAt $info.CapturedAt
+            CapturedAt  = $capturedAt
+            NightDate   = Get-AsiToPixNightDate -CapturedAt $capturedAt
             Telescope   = $info.TelescopeName
         }
     }

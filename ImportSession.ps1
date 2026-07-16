@@ -26,10 +26,10 @@ Import-Module $importModule -Force
 Write-Host "--- ASIAir SESSION IMPORT ---" -ForegroundColor Cyan
 
 if ([string]::IsNullOrWhiteSpace($SourcePath)) {
-    $SourcePath = (Read-Host "Enter ASIAir Light folder path, copied import folder, or a FITS file inside it").Trim('"')
+    $SourcePath = (Read-Host "Enter light folder path, copied import folder, or a FITS/RAW file inside it").Trim('"')
 }
 
-if ($SourcePath -match '\.fits?(\.gz)?$') {
+if ($SourcePath -match '(?i)\.(fits?|fits?\.gz|arw|cr2|cr3|nef|nrw|raf|orf|rw2|dng|pef|srw|3fr|erf|kdc|mos|mrw|raw)$') {
     $SourcePath = Split-Path -Path $SourcePath -Parent
 }
 Write-AsiToPixCyrillicPathWarning -Path $SourcePath -Context "source path"

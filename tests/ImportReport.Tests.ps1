@@ -86,6 +86,23 @@ Describe "Import report" {
         $summaryLines[2] | Should Be "47 Tuc  0:11"
     }
 
+    It "includes misplaced OSC lights with a Dark filename prefix" {
+        $importPath = Join-Path -Path $TestDrive -ChildPath "dark-prefix"
+        $objectPath = Join-Path -Path $importPath -ChildPath "APO120 @ 0.8x\Light\Ome Cen"
+        New-Item -ItemType Directory -Path $objectPath -Force | Out-Null
+        $fileName = "Dark_180.0s_Bin1_2600MC_gain120_20260716-193952_180deg_-10.3C_APO120_0001.fit"
+        $filePath = Join-Path -Path $objectPath -ChildPath $fileName
+        New-Item -ItemType File -Path $filePath | Out-Null
+
+        $report = @(Get-AsiToPixImportReport -ImportPath $importPath)
+
+        $report.Count | Should Be 1
+        $report[0].Object | Should Be "Ome Cen"
+        $report[0].Exposure | Should Be ([decimal]180)
+        $report[0].RGB | Should Be "1*180"
+        (Get-Item -LiteralPath $filePath).Name | Should Be $fileName
+    }
+
     It "aligns columns using the longest value" {
         $importPath = Join-Path -Path $TestDrive -ChildPath "pretty"
         $shortPath = Join-Path -Path $importPath -ChildPath "APO120 @ 0.8x\Light\Short"

@@ -17,6 +17,10 @@ Main scripts:
 - Shell: PowerShell 5 and higher.
 - Source files may reside on different Windows volumes, including network drives.
 - Paths may contain spaces, Unicode characters, but not Cyrillic characters.
+- Night dates use the local noon-to-noon convention and the `yy.MM.dd`
+  label of the night start date. Captures before 12:00 belong to the
+  previous calendar date; captures at or after 12:00 belong to the current
+  date. Apply this convention to lights and calibration frames.
 - The scripts create symbolic links and must preserve the original files.
 - Never modify, rename, move, or delete source astrophotography files.
 

@@ -28,4 +28,34 @@ Describe "CreateProject WBPP calibration tags" {
         $scriptText | Should Not Match 'Select-CreateProjectUniquePendingLink'
         $scriptText | Should Not Match 'Target_DUMMY|Filter_DUMMY|Session_DUMMY|Exp_DUMMY'
     }
+
+    It "does not use prefix matching for calibration exposure folders" {
+        $scriptText | Should Match 'ConvertTo-CreateProjectExposureNumber -ExposureText \$pathPart'
+        $scriptText | Should Match '\$null -ne \$folderExp -and \$folderExp -eq \$cleanExp'
+        $scriptText | Should Not Match '\$pathPart -like "\$cleanExp\*"'
+    }
+
+    It "resolves object-name input from the ASIAir archive" {
+        $scriptText | Should Match 'function Resolve-CreateProjectInputPath'
+        $scriptText | Should Match 'function Find-CreateProjectAsiairSourceCandidate'
+        $scriptText | Should Match 'Join-Path -Path \$AstroPhotoRoot -ChildPath "ASIAir"'
+        $scriptText | Should Match 'Matching ASIAir projects'
+        $scriptText | Should Match 'Resolve-CreateProjectInputPath -InputPath \$inputPath -AstroPhotoRoot \$baseZ'
+        $scriptText | Should Not Match 'Join-Path -Path \$AstroPhotoRoot -ChildPath "Import"'
+    }
+
+    It "warns about mixed light exposures without splitting CreateProject links" {
+        $scriptText | Should Match 'Mixed light exposures in ASIAir session folder'
+        $scriptText | Should Match 'ImportSession.ps1 or ImportAll.ps1'
+        $scriptText | Should Not Match 'function Get-CreateProjectLightFileGroup'
+        $scriptText | Should Not Match 'SourceFiles ='
+        $scriptText | Should Not Match 'Copy-CreateProjectFileSet'
+    }
+
+    It "keeps the original flat selection prompt behavior" {
+        $scriptText | Should Match 'Select Index \(Enter to accept default\$dtext\)'
+        $scriptText | Should Not Match '\$flatSelectionCache'
+        $scriptText | Should Not Match 'or S to skip'
+        $scriptText | Should Not Match 'Flats skipped for'
+    }
 }

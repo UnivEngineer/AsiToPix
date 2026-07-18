@@ -23,6 +23,50 @@ Describe "Calibration filename parsing" {
         Test-AsiToPixSupportedCalibrationFileName -FileName "result.fit.fz" | Should Be $false
         Test-AsiToPixSupportedCalibrationFileName -FileName "notes.txt" | Should Be $false
     }
+
+    It "accepts null entries when deriving an interactive metadata default" {
+        InModuleScope AsiToPix.ImportCalibration {
+            Get-AsiToPixCalibrationDefaultValue -Value @("S", $null, "S") | Should Be "S"
+            Get-AsiToPixCalibrationDefaultValue -Value @("S", $null, "O") | Should Be ""
+            Get-AsiToPixCalibrationDefaultValue -Value @($null, $null) | Should Be ""
+        }
+    }
+
+    It "shows relative examples before requesting missing metadata" {
+        InModuleScope AsiToPix.ImportCalibration {
+            $records = @(
+                [PSCustomObject]@{ File = [PSCustomObject]@{ FullName = "C:\Import\Flat\example1.fit" } },
+                [PSCustomObject]@{ File = [PSCustomObject]@{ FullName = "C:\Import\Flat\example2.fit" } }
+            )
+            Mock Write-Host {}
+
+            Write-AsiToPixCalibrationMissingMetadataExample `
+                -Description "Flat filter metadata" `
+                -SourcePath "C:\Import" `
+                -Record $records `
+                -MaximumExampleCount 1
+
+            Assert-MockCalled Write-Host -Times 1 -ParameterFilter {
+                $Object -eq "`n[INFO] Flat filter metadata is missing for 2 file(s). Examples:" -and
+                    $ForegroundColor -eq "Yellow"
+            }
+            Assert-MockCalled Write-Host -Times 1 -ParameterFilter {
+                $Object -eq "  Flat\example1.fit" -and $ForegroundColor -eq "DarkGray"
+            }
+            Assert-MockCalled Write-Host -Times 1 -ParameterFilter {
+                $Object -eq "  ... and 1 more file(s)" -and $ForegroundColor -eq "DarkGray"
+            }
+        }
+    }
+
+    It "uses noon as the boundary for calibration night dates" {
+        InModuleScope AsiToPix.ImportCalibration {
+            (Get-AsiToPixCalibrationNightStart -CapturedAt ([datetime]"2026-07-09T11:59:59")) |
+                Should Be ([datetime]"2026-07-08")
+            (Get-AsiToPixCalibrationNightStart -CapturedAt ([datetime]"2026-07-09T12:00:00")) |
+                Should Be ([datetime]"2026-07-09")
+        }
+    }
 }
 
 Describe "Calibration import planning" {
@@ -82,7 +126,7 @@ Describe "Calibration import planning" {
 
         ($destinations -contains (Join-Path $calibrationRoot "SonyA7IV\Source\biases\gain100\20C\26.07\A7400001.ARW")) | Should Be $true
         ($destinations -contains (Join-Path $calibrationRoot "SonyA7IV\Source\darks\gain100\20C\120sec\26.07\A7400002.ARW")) | Should Be $true
-        ($destinations -contains (Join-Path $calibrationRoot "SonyA7IV\Source\flats\Canon EF 200 F2.8 MK2\26.07.12 None\A7400003.ARW")) | Should Be $true
+        ($destinations -contains (Join-Path $calibrationRoot "SonyA7IV\Source\flats\Canon EF 200 F2.8 MK2\26.07.11 None\A7400003.ARW")) | Should Be $true
         @($plan.Entries | Where-Object { $_.UsedFileTime }).Count | Should Be 3
     }
 

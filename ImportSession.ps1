@@ -10,7 +10,10 @@ param(
 
     [string]$TelescopeName = "",
 
-    [string]$CameraName = ""
+    [string]$CameraName = "",
+
+    [ValidateSet("", "Copy", "Symlink")]
+    [string]$ImportMode = ""
 )
 
 Set-StrictMode -Version Latest
@@ -26,17 +29,7 @@ Import-Module $importModule -Force
 Write-Host "--- ASIAir SESSION IMPORT ---" -ForegroundColor Cyan
 
 if ([string]::IsNullOrWhiteSpace($SourcePath)) {
-    $SourcePath = (Read-Host "Enter light folder path, copied import folder, or a FITS/RAW file inside it").Trim('"')
-}
-
-if ($SourcePath -match '(?i)\.(fits?|fits?\.gz|arw|cr2|cr3|nef|nrw|raf|orf|rw2|dng|pef|srw|3fr|erf|kdc|mos|mrw|raw)$') {
-    $SourcePath = Split-Path -Path $SourcePath -Parent
-}
-Write-AsiToPixCyrillicPathWarning -Path $SourcePath -Context "source path"
-
-if (-not (Test-Path -LiteralPath $SourcePath -PathType Container)) {
-    Write-Host "[!] Source folder not found: $SourcePath" -ForegroundColor Red
-    exit 1
+    $SourcePath = (Read-Host "Enter light folder path, FITS/RAW file, or import object name").Trim('"')
 }
 
 if ([string]::IsNullOrWhiteSpace($AstroPhotoRoot)) {
@@ -50,6 +43,18 @@ if (-not (Test-Path -LiteralPath $AstroPhotoRoot -PathType Container)) {
     exit 1
 }
 
+$sourceResolution = Resolve-AsiToPixImportSourcePath -SourcePath $SourcePath -AstroPhotoRoot $AstroPhotoRoot
+$SourcePath = $sourceResolution.SourcePath
+if (-not [string]::IsNullOrWhiteSpace($sourceResolution.AstroPhotoRoot)) {
+    $AstroPhotoRoot = $sourceResolution.AstroPhotoRoot
+}
+Write-AsiToPixCyrillicPathWarning -Path $SourcePath -Context "source path"
+
+if (-not (Test-Path -LiteralPath $SourcePath -PathType Container)) {
+    Write-Host "[!] Source folder not found: $SourcePath" -ForegroundColor Red
+    exit 1
+}
+
 Import-AsiToPixSession `
     -SourcePath $SourcePath `
     -AstroPhotoRoot $AstroPhotoRoot `
@@ -57,4 +62,5 @@ Import-AsiToPixSession `
     -SeasonName $SeasonName `
     -TelescopeName $TelescopeName `
     -CameraName $CameraName `
+    -ImportMode $ImportMode `
     -WhatIf:$WhatIfPreference

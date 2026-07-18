@@ -148,7 +148,9 @@ function Get-AsiToPixImportReport {
     param(
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [string[]]$ImportPath
+        [string[]]$ImportPath,
+
+        [switch]$PromptForMissingData
     )
 
     $report = foreach ($root in $ImportPath) {
@@ -164,12 +166,21 @@ function Get-AsiToPixImportReport {
             }
 
             foreach ($objectDirectory in Get-ChildItem -LiteralPath $lightPath -Directory -ErrorAction Stop) {
+                $resolvedMissingFilter = ""
                 $frames = foreach ($file in Get-ChildItem -LiteralPath $objectDirectory.FullName -File -Recurse -ErrorAction Stop) {
                     if ($file.Name -notmatch '\.fits?(\.gz)?$') {
                         continue
                     }
 
-                    $info = Get-AsiToPixLightFileInfo -FileName $file.Name
+                    $originalInfo = Get-AsiToPixLightFileInfo -FileName $file.Name
+                    $info = Resolve-AsiToPixLightFileInfo `
+                        -FileName $file.Name `
+                        -FilterName $resolvedMissingFilter `
+                        -PromptForMissingData:$PromptForMissingData
+                    if ($originalInfo.CameraName -match 'MM$' -and $originalInfo.FilterName -eq "None" -and
+                        $info.FilterName -ne "None" -and [string]::IsNullOrWhiteSpace($resolvedMissingFilter)) {
+                        $resolvedMissingFilter = $info.FilterName
+                    }
                     if ($null -eq $info.CapturedAt -or $null -eq $info.ExposureSeconds) {
                         Write-Warning "Skipping FITS file with missing timestamp or exposure: $($file.FullName)"
                         continue

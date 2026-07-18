@@ -302,6 +302,20 @@ function Get-AsiToPixCalibrationTemperatureFolder {
     return "$($roundedTemperature.ToString('G29', [System.Globalization.CultureInfo]::InvariantCulture))C"
 }
 
+function Get-AsiToPixCalibrationNightStart {
+    param(
+        [Parameter(Mandatory = $true)]
+        [datetime]$CapturedAt
+    )
+
+    $nightStart = $CapturedAt.Date
+    if ($CapturedAt.Hour -lt 12) {
+        $nightStart = $nightStart.AddDays(-1)
+    }
+
+    return $nightStart
+}
+
 function Get-AsiToPixCalibrationDestinationFolder {
     param(
         [Parameter(Mandatory = $true)]
@@ -338,7 +352,8 @@ function Get-AsiToPixCalibrationDestinationFolder {
 
     $cameraSourceRoot = Join-Path -Path $CalibrationRoot -ChildPath $resolvedCameraName
     $cameraSourceRoot = Join-Path -Path $cameraSourceRoot -ChildPath "Source"
-    $monthName = $SourceRecord.CapturedAt.ToString(
+    $nightStart = Get-AsiToPixCalibrationNightStart -CapturedAt $SourceRecord.CapturedAt
+    $monthName = $nightStart.ToString(
         "yy.MM",
         [System.Globalization.CultureInfo]::InvariantCulture
     )
@@ -358,7 +373,7 @@ function Get-AsiToPixCalibrationDestinationFolder {
             -CameraName $resolvedCameraName
         Assert-AsiToPixCalibrationPathSegment -Value $resolvedFilterName -ValueName "filter name"
 
-        $dateName = $SourceRecord.CapturedAt.ToString(
+        $dateName = $nightStart.ToString(
             "yy.MM.dd",
             [System.Globalization.CultureInfo]::InvariantCulture
         )
@@ -578,6 +593,7 @@ function Get-AsiToPixCalibrationImportPlan {
 function Get-AsiToPixCalibrationDefaultValue {
     param(
         [Parameter(Mandatory = $true)]
+        [AllowNull()]
         [AllowEmptyCollection()]
         [object[]]$Value
     )
@@ -588,6 +604,49 @@ function Get-AsiToPixCalibrationDefaultValue {
     }
 
     return ""
+}
+
+function Write-AsiToPixCalibrationMissingMetadataExample {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Description,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Record,
+
+        [int]$MaximumExampleCount = 3
+    )
+
+    if ($Record.Count -eq 0) {
+        return
+    }
+
+    $separatorCharacters = [char[]]@(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $normalizedSourcePath = [System.IO.Path]::GetFullPath($SourcePath).TrimEnd($separatorCharacters)
+    $sourcePrefix = "$normalizedSourcePath$([System.IO.Path]::DirectorySeparatorChar)"
+
+    Write-Host "`n[INFO] $Description is missing for $($Record.Count) file(s). Examples:" -ForegroundColor Yellow
+    foreach ($example in @($Record | Select-Object -First $MaximumExampleCount)) {
+        $filePath = [System.IO.Path]::GetFullPath($example.File.FullName)
+        $displayPath = if ($filePath.StartsWith($sourcePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $filePath.Substring($sourcePrefix.Length)
+        } else {
+            $filePath
+        }
+        Write-Host "  $displayPath" -ForegroundColor DarkGray
+    }
+
+    $remainingCount = $Record.Count - [Math]::Min($Record.Count, $MaximumExampleCount)
+    if ($remainingCount -gt 0) {
+        Write-Host "  ... and $remainingCount more file(s)" -ForegroundColor DarkGray
+    }
 }
 
 function Read-AsiToPixCalibrationCameraName {
@@ -779,8 +838,13 @@ function Import-AsiToPixCalibration {
     }
 
     $flats = @($records | Where-Object { $_.Category -eq "Flat" })
-    if (@($flats | Where-Object { [string]::IsNullOrWhiteSpace($_.FilterName) }).Count -gt 0 -and
+    $flatsWithoutFilter = @($flats | Where-Object { [string]::IsNullOrWhiteSpace($_.FilterName) })
+    if ($flatsWithoutFilter.Count -gt 0 -and
         [string]::IsNullOrWhiteSpace($FilterName)) {
+        Write-AsiToPixCalibrationMissingMetadataExample `
+            -Description "Flat filter metadata" `
+            -SourcePath $resolvedSourcePath `
+            -Record $flatsWithoutFilter
         $detectedFilter = Get-AsiToPixCalibrationDefaultValue -Value @($flats.FilterName)
         if ([string]::IsNullOrWhiteSpace($detectedFilter)) { $detectedFilter = "None" }
         $FilterName = Read-AsiToPixCalibrationValue `

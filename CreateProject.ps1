@@ -154,6 +154,139 @@ function Get-CreateProjectNameMatch {
     return @($nameMatches | Sort-Object -Property @{ Expression = "Score"; Descending = $true }, Name)
 }
 
+function Find-CreateProjectAsiairSourceCandidate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AstroPhotoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ObjectName
+    )
+
+    $asiairRoot = Join-Path -Path $AstroPhotoRoot -ChildPath "ASIAir"
+    if (-not (Test-Path -LiteralPath $asiairRoot -PathType Container)) {
+        return @()
+    }
+
+    $objectFolders = @(Get-ChildItem -LiteralPath $asiairRoot -Directory -ErrorAction Stop)
+    $objectMatches = @(Get-CreateProjectNameMatch `
+        -DetectedName $ObjectName `
+        -Candidates @($objectFolders | Select-Object -ExpandProperty Name))
+    if ($objectMatches.Count -eq 0) {
+        return @()
+    }
+
+    $matchedNames = @($objectMatches | Select-Object -ExpandProperty Name)
+    $candidates = foreach ($matchedName in $matchedNames) {
+        $objectFolder = $objectFolders | Where-Object { $_.Name -eq $matchedName } | Select-Object -First 1
+        if ($null -eq $objectFolder) { continue }
+
+        foreach ($seasonFolder in Get-ChildItem -LiteralPath $objectFolder.FullName -Directory -ErrorAction Stop) {
+            foreach ($setupFolder in Get-ChildItem -LiteralPath $seasonFolder.FullName -Directory -ErrorAction Stop) {
+                $goodRoot = Join-Path -Path $setupFolder.FullName -ChildPath "Good"
+                if (-not (Test-Path -LiteralPath $goodRoot -PathType Container)) {
+                    continue
+                }
+
+                $sessionPaths = @()
+                $fileCount = 0
+                foreach ($filterFolder in Get-ChildItem -LiteralPath $goodRoot -Directory -ErrorAction Stop) {
+                    foreach ($dateFolder in Get-ChildItem -LiteralPath $filterFolder.FullName -Directory -ErrorAction Stop) {
+                        $files = @(Get-ChildItem -LiteralPath $dateFolder.FullName -File -Filter "*.fit*" -ErrorAction SilentlyContinue)
+                        if ($files.Count -eq 0) {
+                            continue
+                        }
+
+                        $sessionPaths += $dateFolder.FullName
+                        $fileCount += $files.Count
+                    }
+                }
+
+                if ($sessionPaths.Count -eq 0) {
+                    continue
+                }
+
+                [PSCustomObject]@{
+                    ObjectName      = $objectFolder.Name
+                    SeasonName      = $seasonFolder.Name
+                    SetupName       = $setupFolder.Name
+                    FirstSourcePath = @($sessionPaths | Sort-Object)[0]
+                    SessionCount    = $sessionPaths.Count
+                    FileCount       = $fileCount
+                }
+            }
+        }
+    }
+
+    return @($candidates | Sort-Object ObjectName, SeasonName, SetupName)
+}
+
+function Resolve-CreateProjectInputPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AstroPhotoRoot
+    )
+
+    $resolvedInput = $InputPath.Trim().Trim('"')
+    if ($resolvedInput -match '(?i)\.(fits?|fits?\.gz)$') {
+        $resolvedInput = Split-Path -Path $resolvedInput -Parent
+    }
+
+    if (Test-Path -LiteralPath $resolvedInput -PathType Container) {
+        return (Resolve-Path -LiteralPath $resolvedInput).ProviderPath
+    }
+
+    if ([System.IO.Path]::IsPathRooted($resolvedInput) -or $resolvedInput -match '[\\/]') {
+        return $resolvedInput
+    }
+
+    $candidates = @(Find-CreateProjectAsiairSourceCandidate `
+        -AstroPhotoRoot $AstroPhotoRoot `
+        -ObjectName $resolvedInput)
+    if ($candidates.Count -eq 0) {
+        throw "No ASIAir project matching object name '$resolvedInput' found under '$(Join-Path -Path $AstroPhotoRoot -ChildPath "ASIAir")'. Enter a full lights path instead."
+    }
+
+    if ($candidates.Count -eq 1) {
+        Write-Host "[INFO] Object '$resolvedInput' resolved to ASIAir source: $($candidates[0].FirstSourcePath)" -ForegroundColor Cyan
+        return $candidates[0].FirstSourcePath
+    }
+
+    Write-Host "`nMatching ASIAir projects for '${resolvedInput}':" -ForegroundColor Cyan
+    for ($i = 0; $i -lt $candidates.Count; $i++) {
+        $candidate = $candidates[$i]
+        Write-Host (" [{0}] {1} | {2} | {3} | {4} session(s), {5} file(s)" -f `
+            ($i + 1),
+            $candidate.ObjectName,
+            $candidate.SeasonName,
+            $candidate.SetupName,
+            $candidate.SessionCount,
+            $candidate.FileCount) -ForegroundColor White
+        Write-Host "     $($candidate.FirstSourcePath)" -ForegroundColor DarkGray
+    }
+
+    do {
+        $answer = (Read-Host "Select ASIAir source index, press Enter for 1, or type a full lights path").Trim()
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            return $candidates[0].FirstSourcePath
+        }
+
+        if ($answer -match '^\d+$') {
+            $index = [int]$answer - 1
+            if ($index -ge 0 -and $index -lt $candidates.Count) {
+                return $candidates[$index].FirstSourcePath
+            }
+        } elseif (Test-Path -LiteralPath $answer -PathType Container) {
+            return (Resolve-Path -LiteralPath $answer).ProviderPath
+        }
+
+        Write-Host "[!] Invalid ASIAir source selection." -ForegroundColor Red
+    } while ($true)
+}
+
 function Resolve-CreateProjectDefaultProjectPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -382,10 +515,8 @@ $baseZ = Resolve-AstroPhotoRoot
 Write-AsiToPixCyrillicPathWarning -Path $baseZ -Context "AstroPhoto root"
 
 # 1. AUTO-DETECT
-$inputPath = (Read-Host "Paste path to lights folder (or any .fit file inside)").Trim('"')
-
-# If a file path was given, use its parent folder
-if ($inputPath -match '\.\w+$') { $inputPath = Split-Path $inputPath -Parent }
+$inputPath = (Read-Host "Paste lights path, .fit file, or ASIAir object name").Trim('"')
+$inputPath = Resolve-CreateProjectInputPath -InputPath $inputPath -AstroPhotoRoot $baseZ
 Write-AsiToPixCyrillicPathWarning -Path $inputPath -Context "input path"
 
 # Parse the path for project metadata
@@ -696,7 +827,23 @@ function ConvertTo-CreateProjectExposureNumber {
         [string]$ExposureText
     )
 
-    return ($ExposureText -replace '[^0-9\.]', '').Replace(".0", "")
+    $normalizedText = $ExposureText.Trim().Replace(",", ".")
+    $valueText = $null
+    if ($normalizedText -match '^(?<value>\d+(?:\.\d+)?)\s*(?:m?s|sec(?:ond)?s?)$') {
+        $valueText = $Matches["value"]
+    } elseif ($normalizedText -match '^(?<value>\d+(?:\.\d+)?)$') {
+        $valueText = $Matches["value"]
+    } else {
+        return $null
+    }
+
+    $value = [decimal]::Parse(
+        $valueText,
+        [System.Globalization.NumberStyles]::Float,
+        [System.Globalization.CultureInfo]::InvariantCulture
+    )
+
+    return $value.ToString("0.########", [System.Globalization.CultureInfo]::InvariantCulture)
 }
 
 function Get-CreateProjectCalibrationFile {
@@ -727,10 +874,14 @@ function Test-CreateProjectExposureMatch {
     )
 
     $cleanExp = ConvertTo-CreateProjectExposureNumber -ExposureText $ExposureValue
+    if ($null -eq $cleanExp) {
+        return $false
+    }
+
     $pathParts = $Directory.FullName -split '[\\/]'
     foreach ($pathPart in $pathParts) {
         $folderExp = ConvertTo-CreateProjectExposureNumber -ExposureText $pathPart
-        if ($folderExp -eq $cleanExp -or $pathPart -like "$cleanExp*") {
+        if ($null -ne $folderExp -and $folderExp -eq $cleanExp) {
             return $true
         }
     }
@@ -926,17 +1077,41 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
         $sessionDate = ($dFolder.Name -split ' ')[0]
         # DEBUG: print the path and date folder name
         # Write-Host "[DEBUG] Processing session folder: $($dFolder.FullName) | date var: $sessionDate" -ForegroundColor DarkGray
-        $fitsFiles = Get-ChildItem -LiteralPath $dFolder.FullName -Filter "*.fit*" -ErrorAction Stop
-        if (!$fitsFiles) { continue }
+        $fitsFiles = @(Get-ChildItem -LiteralPath $dFolder.FullName -Filter "*.fit*" -ErrorAction Stop)
+        if ($fitsFiles.Count -eq 0) { continue }
+
+        $lightExposures = @($fitsFiles | ForEach-Object {
+            if ($_.Name -match '_(?<exp>\d+(?:\.\d+)?)(?<unit>m?s)_') {
+                $expText = "$($Matches['exp'])$($Matches['unit'])"
+                $normalizedExposure = ConvertTo-CreateProjectExposureNumber -ExposureText $expText
+                if ($null -ne $normalizedExposure) {
+                    "$($normalizedExposure)s"
+                } else {
+                    "Unknown"
+                }
+            } else {
+                "Unknown"
+            }
+        } | Sort-Object -Unique)
+        if ($lightExposures.Count -gt 1) {
+            Write-Host "`n[!] Mixed light exposures in ASIAir session folder: $($dFolder.FullName)" -ForegroundColor Yellow
+            Write-Host "    Exposures: $($lightExposures -join ', ')" -ForegroundColor Yellow
+            Write-Host "    Re-import this session with ImportSession.ps1 or ImportAll.ps1 so exposures are split into date-exposure folders." -ForegroundColor Yellow
+        }
+
         $sample = $fitsFiles | Select-Object -First 1
         $fName = $sample.Name
         $fFound = $null
         $foundIn = $null
 
         # 1. DETECT CAMERA FROM THIS SESSION'S FITS FILENAME
-        $sessionCamFull = $camShort   # fallback to path-level short name
+        $sessionCamFull = $camShort
         if ($fName -match '_(?<camf>(?:ASI)?\d{3,4}M[MCPmcp]+)_') {
-            $sessionCamFull = ("ASI" + $Matches['camf']) -replace '^ASIASI','ASI'
+            $sessionCamFull = $Matches["camf"].ToUpperInvariant()
+            if ($sessionCamFull -notmatch '^ASI') { $sessionCamFull = "ASI$sessionCamFull" }
+        } elseif ($fName -match '_(?<camf>(?:ASI)?\d{3,4}MC)_') {
+            $sessionCamFull = $Matches["camf"].ToUpperInvariant()
+            if ($sessionCamFull -notmatch '^ASI') { $sessionCamFull = "ASI$sessionCamFull" }
         }
         $sessionCamType  = if ($sessionCamFull -match "MM") { "Mono" } else { "OSC" }
         $sessionCalibRoot = Join-Path -Path $baseZ -ChildPath "Calibration"
@@ -948,14 +1123,9 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
         }
 
         # 2. EXTRACT RAW FILTER FROM FILENAME
-        $rawFilt = "None"  # Default to None if filter cannot be determined
-        # Try to extract filter between camera and _gain pattern
-        if ($fName -match "_$( [regex]::Escape($camInFile) )_(?<realFilt>[^_]+)?_gain") {
-            $capturedFilt = $Matches['realFilt']
-            if ($capturedFilt -and $capturedFilt.Trim() -ne "") {
-                $rawFilt = $capturedFilt
-            }
-            # If nothing captured or empty, rawFilt remains "None"
+        $rawFilt = "None"
+        if ($fName -match "_$([regex]::Escape($camInFile))_(?<realFilt>[^_]+)?_gain") {
+            if ($Matches["realFilt"]) { $rawFilt = $Matches["realFilt"] }
         }
         # DEBUG: Uncomment next line to see filename parsing
         # Write-Host "[DEBUG] File: $fName | Cam: $camInFile | Filter: $rawFilt" -ForegroundColor DarkGray
@@ -979,8 +1149,8 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
         # 3. METADATA PARSING (Angle fix)
         $valExp  = if ($fName -match "_(\d+\.?\d*)s_") { $Matches[1] } else { "300" }
         $curExp  = $valExp.Replace(".0","") + "s"
-        $curGain = if ($fName -match "_gain(\d+)_") { $Matches[1] } else { "120" }
-        $curTemp = if ($fName -match "_(-?\d+\.?\d*)C_") { $Matches[1] } else { "-20" }
+        $curGain = if ($fName -match "_gain(\d+)") { $Matches[1] } else { "120" }
+        $curTemp = if ($fName -match "_(-?\d+\.?\d*)C_") { [double]$Matches[1] } else { -20.0 }
         $curAngRaw = if ($fName -match "_(\d+)deg_") { $Matches[1] } else { $null }
         $numCurAng = if ($curAngRaw) { [int]$curAngRaw } else { -999 }
         $angDisp = if ($numCurAng -eq -999) { "Unknown" } else { "${numCurAng}deg" }

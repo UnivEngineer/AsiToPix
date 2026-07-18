@@ -45,7 +45,7 @@ foreach ($path in $resolvedImportPaths) {
 }
 Write-Host "[INFO] Scanning FITS files..." -ForegroundColor Yellow
 
-$report = @(Get-AsiToPixImportReport -ImportPath $resolvedImportPaths)
+$report = @(Get-AsiToPixImportReport -ImportPath $resolvedImportPaths -PromptForMissingData)
 if ($report.Count -eq 0) {
     throw "No supported FITS light files found under Import folder(s): $($resolvedImportPaths -join ', ')"
 }
@@ -58,12 +58,34 @@ foreach ($line in Get-AsiToPixImportReportPrettyLine -Report $report) {
     if ([string]::IsNullOrEmpty($line)) {
         Write-Host ""
         $expectSetup = $true
-    } elseif ($expectSetup) {
+    }
+    elseif ($expectSetup) {
         Write-Host $line -ForegroundColor Yellow
         $expectSetup = $false
-    } elseif ($line -match '^Object\s') {
+    }
+    elseif ($line -match '^Object\s') {
         Write-Host $line -ForegroundColor Cyan
-    } else {
+    }
+    else {
+        Write-Host $line -ForegroundColor Gray
+    }
+}
+
+Write-Host "`n--- INTEGRATION BY OBJECT ---" -ForegroundColor Cyan
+$expectSetup = $true
+foreach ($line in Get-AsiToPixIntegrationSummaryPrettyLine -Report $report) {
+    if ([string]::IsNullOrEmpty($line)) {
+        Write-Host ""
+        $expectSetup = $true
+    }
+    elseif ($expectSetup) {
+        Write-Host $line -ForegroundColor Yellow
+        $expectSetup = $false
+    }
+    elseif ($line -match '^Object\s') {
+        Write-Host $line -ForegroundColor Cyan
+    }
+    else {
         Write-Host $line -ForegroundColor Gray
     }
 }
@@ -84,19 +106,3 @@ $totalDuration = Format-AsiToPixIntegrationTime -Seconds $totalSeconds
 Write-Host "[DONE] Total integration: " -ForegroundColor Green -NoNewline
 Write-Host $totalDuration -ForegroundColor Yellow -NoNewline
 Write-Host " ($totalFrames subs)" -ForegroundColor Gray
-
-Write-Host "`n--- INTEGRATION BY OBJECT ---" -ForegroundColor Cyan
-$expectSetup = $true
-foreach ($line in Get-AsiToPixIntegrationSummaryPrettyLine -Report $report) {
-    if ([string]::IsNullOrEmpty($line)) {
-        Write-Host ""
-        $expectSetup = $true
-    } elseif ($expectSetup) {
-        Write-Host $line -ForegroundColor Yellow
-        $expectSetup = $false
-    } elseif ($line -match '^Object\s') {
-        Write-Host $line -ForegroundColor Cyan
-    } else {
-        Write-Host $line -ForegroundColor Gray
-    }
-}

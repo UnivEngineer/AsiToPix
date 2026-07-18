@@ -72,6 +72,16 @@
 - [ ] После каждого изменения показывать `git diff`.
 ## Recent fixes
 
+- [x] `ImportSession.ps1`/`ImportAll.ps1`: sanitize user-entered destination path segments, including invisible spreadsheet characters such as tabs in object names.
+- [x] `ImportSession.ps1`: normalize ASI setup camera names by removing `MM`/`MC` suffixes and map OSC `None` lights to the `RGB` filter folder.
+- [x] `ImportAll.ps1`: add a batch light importer that scans `Import\<setup>\Light(s)\<object>`, caches season/setup/object choices, and applies shared import plans.
+- [x] `ImportSession.ps1`: split single-session import into reusable find/plan/show/apply functions for batch reuse.
+- [x] `ImportSession.ps1`: add Copy/Symlink import mode selection with Copy as the interactive default.
+- [x] `Get-ImportReport.ps1`: print the overall integration summary after the per-object integration table.
+- [x] `ImportCalibration.ps1`: group flat and other date-based calibration paths by the noon-to-noon night start date.
+- [x] `ImportCalibration.ps1`: show counts and example relative paths before prompting for missing flat filter metadata.
+- [x] `ImportCalibration.ps1`: accept partially or completely missing metadata collections when choosing interactive defaults.
+- [x] Recover exposure and missing filter metadata for lights captured with Dark/Bias/Flat prefixes without changing FITS filenames or incremental-import identity.
 - [x] `ImportCalibration.ps1`: import FIT/FITS/ARW bias, dark, and flat frames into canonical camera `Source` calibration trees with interactive RAW metadata, repeat-import detection, unusual-addition warnings, and `-WhatIf` support.
 - [x] `ImportSession.ps1`: support camera RAW light files such as `.ARW`, using the source folder for object/setup and file timestamps for night dates.
 - [x] `Get-ImportReport.ps1`: add an aligned per-object/filter integration summary in H:MM format.
@@ -85,3 +95,8 @@
 - [x] `CreateProject.ps1`: tested `DUMMY` calibration tags and reverted them because WBPP needs matching keyword values.
 - [x] `CreateProject.ps1`: restore full WBPP calibration tags and report repeated calibration sources without changing project links.
 - [x] `CreateProject.ps1`: suppress repeated calibration warnings for Master folders because WBPP can reuse the same master file.
+- [x] `CreateProject.ps1`: require exact normalized exposure matches so 60s lights cannot select 600sec dark folders.
+- [x] `ImportSession.ps1`: allow the first source prompt to accept an object name and fuzzy-search matching default Import sessions.
+- [x] `CreateProject.ps1`: allow the first lights prompt to accept an object name and fuzzy-search matching ASIAir archive projects.
+- [x] `CreateProject.ps1`: warn when an ASIAir light session folder contains mixed exposures without changing project links.
+- [x] `ImportSession.ps1`/`ImportAll.ps1`: split imported light folders by exposure suffix when one filter/night contains mixed exposures, for example `26.07.10-180s`.

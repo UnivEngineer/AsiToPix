@@ -15,6 +15,9 @@ Import-Module $pathsModule -Force
 $projectMetadataModule = Join-Path $PSScriptRoot "src\AsiToPix.ProjectMetadata.psm1"
 Import-Module $projectMetadataModule -Force
 
+$imageFilesModule = Join-Path $PSScriptRoot "src\AsiToPix.ImageFiles.psm1"
+Import-Module $imageFilesModule -Force
+
 function Read-CreateProjectConfirmation {
     param(
         [Parameter(Mandatory = $true)]
@@ -192,7 +195,8 @@ function Find-CreateProjectAsiairSourceCandidate {
                 $fileCount = 0
                 foreach ($filterFolder in Get-ChildItem -LiteralPath $goodRoot -Directory -ErrorAction Stop) {
                     foreach ($dateFolder in Get-ChildItem -LiteralPath $filterFolder.FullName -Directory -ErrorAction Stop) {
-                        $files = @(Get-ChildItem -LiteralPath $dateFolder.FullName -File -Filter "*.fit*" -ErrorAction SilentlyContinue)
+                        $files = @(Get-ChildItem -LiteralPath $dateFolder.FullName -File -ErrorAction SilentlyContinue |
+                            Where-Object { Test-AsiToPixSupportedImageFileName -FileName $_.Name })
                         if ($files.Count -eq 0) {
                             continue
                         }
@@ -515,7 +519,7 @@ $baseZ = Resolve-AstroPhotoRoot
 Write-AsiToPixCyrillicPathWarning -Path $baseZ -Context "AstroPhoto root"
 
 # 1. AUTO-DETECT
-$inputPath = (Read-Host "Paste lights path, .fit file, or ASIAir object name").Trim('"')
+$inputPath = (Read-Host "Paste lights path, supported image file, or ASIAir object name").Trim('"')
 $inputPath = Resolve-CreateProjectInputPath -InputPath $inputPath -AstroPhotoRoot $baseZ
 Write-AsiToPixCyrillicPathWarning -Path $inputPath -Context "input path"
 
@@ -855,7 +859,7 @@ function Get-CreateProjectCalibrationFile {
     )
 
     $files = Get-ChildItem -LiteralPath $Path -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '\.(fits?|xisf)(\.gz)?$' }
+        Where-Object { Test-AsiToPixSupportedImageFileName -FileName $_.Name }
 
     if ($First -gt 0) {
         return @($files | Select-Object -First $First)
@@ -1077,10 +1081,11 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
         $sessionDate = ($dFolder.Name -split ' ')[0]
         # DEBUG: print the path and date folder name
         # Write-Host "[DEBUG] Processing session folder: $($dFolder.FullName) | date var: $sessionDate" -ForegroundColor DarkGray
-        $fitsFiles = @(Get-ChildItem -LiteralPath $dFolder.FullName -Filter "*.fit*" -ErrorAction Stop)
-        if ($fitsFiles.Count -eq 0) { continue }
+        $imageFiles = @(Get-ChildItem -LiteralPath $dFolder.FullName -File -ErrorAction Stop |
+            Where-Object { Test-AsiToPixSupportedImageFileName -FileName $_.Name })
+        if ($imageFiles.Count -eq 0) { continue }
 
-        $lightExposures = @($fitsFiles | ForEach-Object {
+        $lightExposures = @($imageFiles | ForEach-Object {
             if ($_.Name -match '_(?<exp>\d+(?:\.\d+)?)(?<unit>m?s)_') {
                 $expText = "$($Matches['exp'])$($Matches['unit'])"
                 $normalizedExposure = ConvertTo-CreateProjectExposureNumber -ExposureText $expText
@@ -1099,7 +1104,7 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
             Write-Host "    Re-import this session with ImportSession.ps1 or ImportAll.ps1 so exposures are split into date-exposure folders." -ForegroundColor Yellow
         }
 
-        $sample = $fitsFiles | Select-Object -First 1
+        $sample = $imageFiles | Select-Object -First 1
         $fName = $sample.Name
         $fFound = $null
         $foundIn = $null
@@ -1685,7 +1690,8 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
             }
 
             # Check for potential keyword conflicts in flat files
-            $flatFiles = Get-ChildItem -LiteralPath $fFound.FullName -Filter "*.fit*" -ErrorAction SilentlyContinue
+            $flatFiles = Get-ChildItem -LiteralPath $fFound.FullName -File -ErrorAction SilentlyContinue |
+                Where-Object { Test-AsiToPixSupportedImageFileName -FileName $_.Name }
             if ($flatFiles) {
                 foreach ($flatFile in $flatFiles) {
                     $fileName = $flatFile.Name
@@ -1703,7 +1709,9 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
             }
 
             # Flat-Darks
-            $fSample = Get-ChildItem -LiteralPath $fFound.FullName -Filter "*.fit*" -ErrorAction Stop | Select-Object -First 1
+            $fSample = Get-ChildItem -LiteralPath $fFound.FullName -File -ErrorAction Stop |
+                Where-Object { Test-AsiToPixSupportedImageFileName -FileName $_.Name } |
+                Select-Object -First 1
             if ($fSample -and ($fSample.Name -match "_(\d+\.?\d*)m?s_")) {
                 $fdExp = $Matches[1] + "s"
                 $fd = Get-CalibPath "FlatDarks" $curGain $curTemp $fdExp $sessionCalibBase $sessionDate
@@ -1723,7 +1731,8 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
                         Target      = $targetGrp
                     }
                     # Check for potential keyword conflicts in flat-dark files
-                    $flatDarkFiles = Get-ChildItem -LiteralPath $fd.Path -Filter "*.fit*" -ErrorAction SilentlyContinue
+                    $flatDarkFiles = Get-ChildItem -LiteralPath $fd.Path -File -ErrorAction SilentlyContinue |
+                        Where-Object { Test-AsiToPixSupportedImageFileName -FileName $_.Name }
                     if ($flatDarkFiles) {
                         foreach ($flatDarkFile in ($flatDarkFiles | Select-Object -First 3)) {  # Check only first 3 files for performance
                             $fileName = $flatDarkFile.Name

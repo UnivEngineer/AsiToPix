@@ -58,4 +58,10 @@ Describe "CreateProject WBPP calibration tags" {
         $scriptText | Should Not Match 'or S to skip'
         $scriptText | Should Not Match 'Flats skipped for'
     }
+
+    It "uses the shared PixInsight image format helper" {
+        $scriptText | Should Match 'AsiToPix\.ImageFiles\.psm1'
+        $scriptText | Should Match 'Test-AsiToPixSupportedImageFileName'
+        $scriptText | Should Not Match 'Filter "\*\.fit\*"'
+    }
 }

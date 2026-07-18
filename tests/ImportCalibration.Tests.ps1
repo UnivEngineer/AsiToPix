@@ -16,12 +16,26 @@ Describe "Calibration filename parsing" {
         $info.CapturedAt | Should Be ([datetime]"2026-07-09T05:17:53")
     }
 
-    It "recognizes only the requested FITS and ARW calibration extensions" {
+    It "uses the shared PixInsight image extension list" {
         Test-AsiToPixSupportedCalibrationFileName -FileName "frame.FIT" | Should Be $true
         Test-AsiToPixSupportedCalibrationFileName -FileName "frame.fits" | Should Be $true
         Test-AsiToPixSupportedCalibrationFileName -FileName "frame.ARW" | Should Be $true
-        Test-AsiToPixSupportedCalibrationFileName -FileName "result.fit.fz" | Should Be $false
+        Test-AsiToPixSupportedCalibrationFileName -FileName "frame.CR3" | Should Be $true
+        Test-AsiToPixSupportedCalibrationFileName -FileName "frame.xisf" | Should Be $true
+        Test-AsiToPixSupportedCalibrationFileName -FileName "frame.tiff" | Should Be $true
+        Test-AsiToPixSupportedCalibrationFileName -FileName "result.fit.fz" | Should Be $true
         Test-AsiToPixSupportedCalibrationFileName -FileName "notes.txt" | Should Be $false
+    }
+
+    It "accepts singular and plural calibration folder names" {
+        InModuleScope AsiToPix.ImportCalibration {
+            Get-AsiToPixCalibrationCategoryName -FolderName "bias" | Should Be "Bias"
+            Get-AsiToPixCalibrationCategoryName -FolderName "biases" | Should Be "Bias"
+            Get-AsiToPixCalibrationCategoryName -FolderName "dark" | Should Be "Dark"
+            Get-AsiToPixCalibrationCategoryName -FolderName "darks" | Should Be "Dark"
+            Get-AsiToPixCalibrationCategoryName -FolderName "flat" | Should Be "Flat"
+            Get-AsiToPixCalibrationCategoryName -FolderName "flats" | Should Be "Flat"
+        }
     }
 
     It "accepts null entries when deriving an interactive metadata default" {

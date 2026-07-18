@@ -3,6 +3,9 @@ Set-StrictMode -Version Latest
 $importSessionModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.ImportSession.psm1"
 Import-Module $importSessionModule -Force
 
+$imageFilesModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.ImageFiles.psm1"
+Import-Module $imageFilesModule -Force
+
 function ConvertTo-AsiToPixReportFilter {
     param(
         [AllowEmptyString()]
@@ -160,15 +163,17 @@ function Get-AsiToPixImportReport {
 
         $resolvedRoot = (Resolve-Path -LiteralPath $root -ErrorAction Stop).ProviderPath
         foreach ($setupDirectory in Get-ChildItem -LiteralPath $resolvedRoot -Directory -ErrorAction Stop) {
-            $lightPath = Join-Path -Path $setupDirectory.FullName -ChildPath "Light"
-            if (-not (Test-Path -LiteralPath $lightPath -PathType Container)) {
-                continue
-            }
+            $lightFolders = @(Get-ChildItem -LiteralPath $setupDirectory.FullName -Directory -ErrorAction Stop |
+                Where-Object { $_.Name -in @("Light", "Lights") })
+            $objectDirectories = @($lightFolders | ForEach-Object {
+                Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction Stop
+            })
 
-            foreach ($objectDirectory in Get-ChildItem -LiteralPath $lightPath -Directory -ErrorAction Stop) {
+            foreach ($objectDirectory in $objectDirectories) {
                 $resolvedMissingFilter = ""
+                $resolvedMissingExposure = ""
                 $frames = foreach ($file in Get-ChildItem -LiteralPath $objectDirectory.FullName -File -Recurse -ErrorAction Stop) {
-                    if ($file.Name -notmatch '\.fits?(\.gz)?$') {
+                    if (-not (Test-AsiToPixSupportedImageFileName -FileName $file.Name)) {
                         continue
                     }
 
@@ -176,19 +181,25 @@ function Get-AsiToPixImportReport {
                     $info = Resolve-AsiToPixLightFileInfo `
                         -FileName $file.Name `
                         -FilterName $resolvedMissingFilter `
+                        -ExposureSeconds $resolvedMissingExposure `
                         -PromptForMissingData:$PromptForMissingData
+                    if ($null -eq $originalInfo.ExposureSeconds -and $null -ne $info.ExposureSeconds -and
+                        [string]::IsNullOrWhiteSpace($resolvedMissingExposure)) {
+                        $resolvedMissingExposure = $info.ExposureSeconds
+                    }
                     if ($originalInfo.CameraName -match 'MM$' -and $originalInfo.FilterName -eq "None" -and
                         $info.FilterName -ne "None" -and [string]::IsNullOrWhiteSpace($resolvedMissingFilter)) {
                         $resolvedMissingFilter = $info.FilterName
                     }
-                    if ($null -eq $info.CapturedAt -or $null -eq $info.ExposureSeconds) {
-                        Write-Warning "Skipping FITS file with missing timestamp or exposure: $($file.FullName)"
+                    $capturedAt = if ($null -ne $info.CapturedAt) { $info.CapturedAt } else { $file.LastWriteTime }
+                    if ($null -eq $capturedAt -or $null -eq $info.ExposureSeconds) {
+                        Write-Warning "Skipping image file with missing timestamp or exposure: $($file.FullName)"
                         continue
                     }
 
                     $reportFilter = ConvertTo-AsiToPixReportFilter -FilterName $info.FilterName
                     if ($null -eq $reportFilter) {
-                        Write-Warning "Skipping FITS file with unsupported filter '$($info.FilterName)': $($file.FullName)"
+                        Write-Warning "Skipping image file with unsupported filter '$($info.FilterName)': $($file.FullName)"
                         continue
                     }
 
@@ -199,7 +210,7 @@ function Get-AsiToPixImportReport {
                             [System.Globalization.NumberStyles]::Number,
                             [System.Globalization.CultureInfo]::InvariantCulture
                         )
-                        NightDate       = Get-AsiToPixNightDate -CapturedAt $info.CapturedAt
+                        NightDate       = Get-AsiToPixNightDate -CapturedAt $capturedAt
                     }
                 }
 

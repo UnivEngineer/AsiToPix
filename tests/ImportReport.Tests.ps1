@@ -103,6 +103,44 @@ Describe "Import report" {
         (Get-Item -LiteralPath $filePath).Name | Should Be $fileName
     }
 
+    It "scans a plural Lights folder and shared non-FITS formats" {
+        $importPath = Join-Path -Path $TestDrive -ChildPath "plural-lights"
+        $objectPath = Join-Path -Path $importPath -ChildPath "SQA55 @ 1.0x\Lights\M 31"
+        New-Item -ItemType Directory -Path $objectPath -Force | Out-Null
+        @(
+            "Light_M31_120.0s_Bin1_2600MC_gain120_20260717-193952_0deg_-10.0C_SQA55_0001.xisf",
+            "Light_M31_120.0s_Bin1_2600MC_gain120_20260718-193952_0deg_-10.0C_SQA55_0002.tiff"
+        ) | ForEach-Object {
+            New-Item -ItemType File -Path (Join-Path -Path $objectPath -ChildPath $_) | Out-Null
+        }
+
+        $report = @(Get-AsiToPixImportReport -ImportPath $importPath)
+
+        $report.Count | Should Be 1
+        $report[0].Object | Should Be "M 31"
+        $report[0].FrameCount | Should Be 2
+        $report[0].RGB | Should Be "(1+1)*120"
+    }
+
+    It "prompts once for missing RAW exposure and uses the file timestamp" {
+        $importPath = Join-Path -Path $TestDrive -ChildPath "raw-report"
+        $objectPath = Join-Path -Path $importPath -ChildPath "Canon 200mm\Lights\Rho Oph"
+        New-Item -ItemType Directory -Path $objectPath -Force | Out-Null
+        $first = New-Item -ItemType File -Path (Join-Path -Path $objectPath -ChildPath "IMG_0001.CR3")
+        $second = New-Item -ItemType File -Path (Join-Path -Path $objectPath -ChildPath "IMG_0002.CR3")
+        $first.LastWriteTime = [datetime]"2026-07-18T01:00:00"
+        $second.LastWriteTime = [datetime]"2026-07-18T02:00:00"
+
+        Mock Read-AsiToPixRequiredValue { "30" } -ModuleName AsiToPix.ImportSession
+
+        $report = @(Get-AsiToPixImportReport -ImportPath $importPath -PromptForMissingData)
+
+        $report.Count | Should Be 1
+        $report[0].FrameCount | Should Be 2
+        $report[0].RGB | Should Be "2*30"
+        Assert-MockCalled Read-AsiToPixRequiredValue -Times 1 -ModuleName AsiToPix.ImportSession
+    }
+
     It "aligns columns using the longest value" {
         $importPath = Join-Path -Path $TestDrive -ChildPath "pretty"
         $shortPath = Join-Path -Path $importPath -ChildPath "APO120 @ 0.8x\Light\Short"

@@ -72,6 +72,7 @@
 - [ ] После каждого изменения показывать `git diff`.
 ## Recent fixes
 
+- [x] Share PixInsight image extensions across import/report/project scripts and accept singular or plural light/calibration folder names.
 - [x] `ImportSession.ps1`/`ImportAll.ps1`: sanitize user-entered destination path segments, including invisible spreadsheet characters such as tabs in object names.
 - [x] `ImportSession.ps1`: normalize ASI setup camera names by removing `MM`/`MC` suffixes and map OSC `None` lights to the `RGB` filter folder.
 - [x] `ImportAll.ps1`: add a batch light importer that scans `Import\<setup>\Light(s)\<object>`, caches season/setup/object choices, and applies shared import plans.

@@ -1,5 +1,8 @@
 Set-StrictMode -Version Latest
 
+$imageFilesModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.ImageFiles.psm1"
+Import-Module $imageFilesModule -Force
+
 function Read-AsiToPixCalibrationValue {
     param(
         [Parameter(Mandatory = $true)]
@@ -106,7 +109,7 @@ function Test-AsiToPixSupportedCalibrationFileName {
         [string]$FileName
     )
 
-    return ($FileName -match '(?i)\.(fit|fits|arw)$')
+    return (Test-AsiToPixSupportedImageFileName -FileName $FileName)
 }
 
 function Get-AsiToPixCalibrationCategoryName {
@@ -133,7 +136,7 @@ function ConvertFrom-AsiToPixCalibrationFileName {
         [string]$Category
     )
 
-    $stem = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
+    $stem = Get-AsiToPixImageFileStem -FileName $FileName
     $exposureSeconds = $null
     if ($stem -match '^(?:Bias|Dark|Flat)_(?<value>\d+(?:\.\d+)?)(?<unit>ms|s)(?:_|$)') {
         $exposure = [decimal]::Parse(
@@ -245,7 +248,7 @@ function Get-AsiToPixCalibrationSourceRecord {
     }
 
     if ($records.Count -eq 0) {
-        throw "No .fit, .fits, or .arw calibration files found under import root: $resolvedSourcePath"
+        throw "No supported PixInsight calibration image files found under import root: $resolvedSourcePath"
     }
 
     return @($records)

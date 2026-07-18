@@ -355,4 +355,27 @@ Describe "ImportSession parsing" {
 
         Remove-Item Env:\ASITOPIX_RAW_TEST_FOLDER
     }
+
+    It "uses file time metadata for a supported image without a timestamp in its name" {
+        $sourcePath = Join-Path -Path $TestDrive -ChildPath "tiff-fallback\APO120 @ 0.8x\lights\M 31"
+        $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "tiff-fallback-target"
+        New-Item -ItemType Directory -Path $sourcePath -Force | Out-Null
+        New-Item -ItemType Directory -Path $astroPhotoRoot -Force | Out-Null
+        $sourceFile = New-Item -ItemType File -Path (Join-Path -Path $sourcePath -ChildPath "Light_M31_120s_IMG_0001.tiff")
+        $sourceFile.LastWriteTime = [datetime]"2026-07-18T01:17:58"
+
+        $plan = Get-AsiToPixImportPlan `
+            -SourcePath $sourcePath `
+            -AstroPhotoRoot $astroPhotoRoot `
+            -ObjectName "M 31" `
+            -SeasonName "2026" `
+            -TelescopeName "APO120" `
+            -CameraName "ASI2600MC" `
+            -ImportMode "Copy"
+
+        $plan.ParsedFiles.Count | Should Be 1
+        $plan.ParsedFiles[0].File.Name | Should Be "Light_M31_120s_IMG_0001.tiff"
+        $plan.ParsedFiles[0].CapturedAt | Should Be ([datetime]"2026-07-18T01:17:58")
+        $plan.ParsedFiles[0].NightDate | Should Be "26.07.17"
+    }
 }

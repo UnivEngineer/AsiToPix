@@ -29,7 +29,7 @@ Import-Module $importModule -Force
 Write-Host "--- ASIAir SESSION IMPORT ---" -ForegroundColor Cyan
 
 if ([string]::IsNullOrWhiteSpace($SourcePath)) {
-    $SourcePath = (Read-Host "Enter light folder path, FITS/RAW file, or import object name").Trim('"')
+    $SourcePath = (Read-Host "Enter light folder path, supported image file, or import object name").Trim('"')
 }
 
 if ([string]::IsNullOrWhiteSpace($AstroPhotoRoot)) {

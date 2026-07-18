@@ -1,5 +1,8 @@
 Set-StrictMode -Version Latest
 
+$imageFilesModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.ImageFiles.psm1"
+Import-Module $imageFilesModule -Force
+
 function ConvertTo-AsiToPixPathSegment {
     param(
         [AllowEmptyString()]
@@ -300,10 +303,7 @@ function Get-AsiToPixLightFileInfo {
         [string]$FileName
     )
 
-    $nameWithoutExtension = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
-    if ($nameWithoutExtension.EndsWith(".fit", [System.StringComparison]::OrdinalIgnoreCase)) {
-        $nameWithoutExtension = [System.IO.Path]::GetFileNameWithoutExtension($nameWithoutExtension)
-    }
+    $nameWithoutExtension = Get-AsiToPixImageFileStem -FileName $FileName
 
     $objectName = $null
     $exposureSeconds = $null
@@ -382,10 +382,37 @@ function Resolve-AsiToPixLightFileInfo {
 
         [string]$FilterName = "",
 
+        [string]$ExposureSeconds = "",
+
         [switch]$PromptForMissingData
     )
 
     $info = Get-AsiToPixLightFileInfo -FileName $FileName
+    if ($null -eq $info.ExposureSeconds) {
+        $resolvedExposureSeconds = $ExposureSeconds.Trim().Replace(',', '.')
+        if ([string]::IsNullOrWhiteSpace($resolvedExposureSeconds) -and $PromptForMissingData) {
+            $resolvedExposureSeconds = Read-AsiToPixRequiredValue `
+                -Prompt "Enter the light exposure in seconds for file '$FileName'" `
+                -ValueName "exposure"
+            $resolvedExposureSeconds = $resolvedExposureSeconds.Replace(',', '.')
+        }
+        if (-not [string]::IsNullOrWhiteSpace($resolvedExposureSeconds)) {
+            $exposureValue = [decimal]0
+            if (-not [decimal]::TryParse(
+                $resolvedExposureSeconds,
+                [System.Globalization.NumberStyles]::Float,
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [ref]$exposureValue
+            ) -or $exposureValue -le 0) {
+                throw "Invalid light exposure '$resolvedExposureSeconds' for file: $FileName"
+            }
+            $info.ExposureSeconds = $exposureValue.ToString(
+                "0.############################",
+                [System.Globalization.CultureInfo]::InvariantCulture
+            )
+        }
+    }
+
     if ($info.CameraName -match 'MM$' -and $info.FilterName -eq "None") {
         $resolvedFilterName = $FilterName.Trim()
         if ([string]::IsNullOrWhiteSpace($resolvedFilterName) -and $PromptForMissingData) {
@@ -547,28 +574,7 @@ function Test-AsiToPixRawFileName {
         [string]$FileName
     )
 
-    $rawExtensions = @(
-        ".arw",
-        ".cr2",
-        ".cr3",
-        ".nef",
-        ".nrw",
-        ".raf",
-        ".orf",
-        ".rw2",
-        ".dng",
-        ".pef",
-        ".srw",
-        ".3fr",
-        ".erf",
-        ".kdc",
-        ".mos",
-        ".mrw",
-        ".raw"
-    )
-    $extension = [System.IO.Path]::GetExtension($FileName).ToLowerInvariant()
-
-    return ($rawExtensions -contains $extension)
+    return (Test-AsiToPixRawImageFileName -FileName $FileName)
 }
 
 function Test-AsiToPixSupportedLightFileName {
@@ -577,7 +583,7 @@ function Test-AsiToPixSupportedLightFileName {
         [string]$FileName
     )
 
-    return ($FileName -match '(?i)\.fits?(\.gz)?$' -or (Test-AsiToPixRawFileName -FileName $FileName))
+    return (Test-AsiToPixSupportedImageFileName -FileName $FileName)
 }
 
 function Get-AsiToPixSetupInfo {
@@ -977,24 +983,30 @@ function Get-AsiToPixImportPlan {
 
     $files = @(Get-AsiToPixSourceLightFile -SourcePath $resolvedSourcePath)
     if ($files.Count -eq 0) {
-        throw "No supported FITS or RAW light files found under source path: $resolvedSourcePath"
+        throw "No supported PixInsight image files found under source path: $resolvedSourcePath"
     }
 
     $detectedSourceObject = Get-AsiToPixDetectedObject -SourcePath $resolvedSourcePath
     $resolvedMissingFilter = ""
+    $resolvedMissingExposure = ""
     $parsedFiles = foreach ($file in $files) {
         $originalInfo = Get-AsiToPixLightFileInfo -FileName $file.Name
         $info = Resolve-AsiToPixLightFileInfo `
             -FileName $file.Name `
             -FilterName $resolvedMissingFilter `
+            -ExposureSeconds $resolvedMissingExposure `
             -PromptForMissingData
+        if ($null -eq $originalInfo.ExposureSeconds -and $null -ne $info.ExposureSeconds -and
+            [string]::IsNullOrWhiteSpace($resolvedMissingExposure)) {
+            $resolvedMissingExposure = $info.ExposureSeconds
+        }
         if ($info.CameraName -match 'MM$' -and $info.FilterName -ne "None" -and
             [string]::IsNullOrWhiteSpace($resolvedMissingFilter) -and
             $originalInfo.FilterName -eq "None") {
             $resolvedMissingFilter = $info.FilterName
         }
         $capturedAt = $info.CapturedAt
-        if ($null -eq $capturedAt -and (Test-AsiToPixRawFileName -FileName $file.Name)) {
+        if ($null -eq $capturedAt) {
             $capturedAt = $file.LastWriteTime
         }
 
@@ -1017,7 +1029,7 @@ function Get-AsiToPixImportPlan {
 
     $parsedFiles = @($parsedFiles)
     if ($parsedFiles.Count -eq 0) {
-        throw "No importable ASIAir light files found under source path: $resolvedSourcePath"
+        throw "No importable light image files found under source path: $resolvedSourcePath"
     }
 
     $parsedFilesByFilterAndNight = $parsedFiles | Group-Object -Property FilterName, NightDate

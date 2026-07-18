@@ -38,6 +38,28 @@ Describe "WBPP master filename parsing" {
 }
 
 Describe "Master export planning" {
+    It "uses an existing singular mixed-case calibration folder" {
+        $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "AstroPhoto"
+        $masterRoot = Join-Path -Path $astroPhotoRoot -ChildPath "Calibration\ASI2600MM\Master"
+        $existingDarkRoot = Join-Path -Path $masterRoot -ChildPath "dArK"
+        New-Item -ItemType Directory -Path $existingDarkRoot -Force | Out-Null
+        $env:ASITOPIX_EXPORT_ASTROPHOTO_ROOT = $astroPhotoRoot
+        $env:ASITOPIX_EXPORT_DARK_ROOT = $existingDarkRoot
+
+        InModuleScope AsiToPix.ExportMasters {
+            $camera = [PSCustomObject]@{ Name = "ASI2600MM" }
+            $actual = Get-AsiToPixCalibrationFolder `
+                -CameraMetadata $camera `
+                -Category Darks `
+                -AstroPhotoRoot $env:ASITOPIX_EXPORT_ASTROPHOTO_ROOT
+
+            $actual | Should Be $env:ASITOPIX_EXPORT_DARK_ROOT
+        }
+
+        Remove-Item Env:\ASITOPIX_EXPORT_ASTROPHOTO_ROOT
+        Remove-Item Env:\ASITOPIX_EXPORT_DARK_ROOT
+    }
+
     It "deduplicates filter-specific dark masters that resolve to one calibration path" {
         $pixPath = Join-Path -Path $TestDrive -ChildPath "project\Pix"
         $masterPath = Join-Path -Path $pixPath -ChildPath "master"

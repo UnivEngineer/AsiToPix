@@ -3,6 +3,9 @@ Set-StrictMode -Version Latest
 $environmentModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.Environment.psm1"
 Import-Module $environmentModule
 
+$frameFoldersModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.FrameFolders.psm1"
+Import-Module $frameFoldersModule -Force
+
 function Get-AsiToPixProjectSourceFolderName {
     [CmdletBinding()]
     [OutputType([string])]
@@ -11,8 +14,10 @@ function Get-AsiToPixProjectSourceFolderName {
         [string]$Type
     )
 
-    if ($Type -in @("FlatDarks", "flat-darks")) {
-        return "flat-darks"
+    foreach ($kind in @("Light", "Bias", "Dark", "Flat", "FlatDark")) {
+        if (Test-AsiToPixFrameFolderName -Name $Type -Kind $kind) {
+            return (Get-AsiToPixCanonicalFrameFolderName -Kind $kind)
+        }
     }
 
     return $Type

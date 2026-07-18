@@ -18,6 +18,9 @@ Import-Module $projectMetadataModule -Force
 $imageFilesModule = Join-Path $PSScriptRoot "src\AsiToPix.ImageFiles.psm1"
 Import-Module $imageFilesModule -Force
 
+$frameFoldersModule = Join-Path $PSScriptRoot "src\AsiToPix.FrameFolders.psm1"
+Import-Module $frameFoldersModule -Force
+
 function Read-CreateProjectConfirmation {
     param(
         [Parameter(Mandatory = $true)]
@@ -996,52 +999,55 @@ function Write-CreateProjectCalibrationDirectoryWarning {
 
 # Calibration Path Helper - $cb = calibration base for this session's camera
 function Get-CalibPath($type, $gain, $rawTemp, $expValue, $cb, $sessionDate) {
-    $sub = switch($type) { "Darks" {"darks"} "Biases" {"biases"} "FlatDarks" {"flat-darks"} }
+    $folderKind = switch($type) { "Darks" {"Dark"} "Biases" {"Bias"} "FlatDarks" {"FlatDark"} }
     $numTemp = [double]($rawTemp -replace '[^-\d\.]', '')
     $targetTempFolder = "$([Math]::Round($numTemp / 5.0) * 5)C"
     $sessionDateObj = if ($sessionDate) { ConvertTo-CreateProjectDate -DateText $sessionDate } else { $null }
     $candidates = @()
     
     foreach ($m in @("Master", "Source")) {
-        $kindRoot = Join-Path -Path $cb -ChildPath "$m\$sub"
-        Write-CreateProjectCalibrationDirectoryWarning -RootPath $kindRoot
-        $gainRoot = Join-Path -Path $kindRoot -ChildPath "Gain$gain"
-        $baseDirs = @(Get-CreateProjectTemperatureDirectory -GainRoot $gainRoot -TargetTempFolder $targetTempFolder)
-        foreach ($baseDir in $baseDirs) {
-            $base = $baseDir.FullName
-            $candidateDirs = @()
-            $candidateDirs += $baseDir
-            $candidateDirs += @(Get-ChildItem -LiteralPath $base -Directory -Recurse -ErrorAction Stop)
+        $modeRoot = Join-Path -Path $cb -ChildPath $m
+        foreach ($kindRootItem in @(Get-AsiToPixChildFrameFolder -Path $modeRoot -Kind $folderKind)) {
+            $kindRoot = $kindRootItem.FullName
+            Write-CreateProjectCalibrationDirectoryWarning -RootPath $kindRoot
+            $gainRoot = Join-Path -Path $kindRoot -ChildPath "Gain$gain"
+            $baseDirs = @(Get-CreateProjectTemperatureDirectory -GainRoot $gainRoot -TargetTempFolder $targetTempFolder)
+            foreach ($baseDir in $baseDirs) {
+                $base = $baseDir.FullName
+                $candidateDirs = @()
+                $candidateDirs += $baseDir
+                $candidateDirs += @(Get-ChildItem -LiteralPath $base -Directory -Recurse -ErrorAction Stop)
 
-            foreach ($dir in $candidateDirs) {
-                $hasFiles = [bool](Get-CreateProjectCalibrationFile -Path $dir.FullName -First 1)
-                if (-not $hasFiles -and $dir.FullName -ne $base) {
-                    continue
-                }
+                foreach ($dir in $candidateDirs) {
+                    $hasFiles = [bool](Get-CreateProjectCalibrationFile -Path $dir.FullName -First 1)
+                    if (-not $hasFiles -and $dir.FullName -ne $base) {
+                        continue
+                    }
 
-                if ($expValue -and -not (Test-CreateProjectExposureMatch -Directory $dir -ExposureValue $expValue)) {
-                    continue
-                }
+                    if ($expValue -and -not (Test-CreateProjectExposureMatch -Directory $dir -ExposureValue $expValue)) {
+                        continue
+                    }
 
-                if (-not $expValue -and -not $hasFiles) {
-                    continue
-                }
+                    if (-not $expValue -and -not $hasFiles) {
+                        continue
+                    }
 
-                $calibDate = Get-CreateProjectCalibrationDate -Path $dir.FullName -SessionDate $sessionDateObj
-                $dateDiff = Get-CreateProjectDateDiff `
-                    -CalibrationDate $calibDate `
-                    -SessionDate $sessionDateObj `
-                    -CalibrationPath $dir.FullName
+                    $calibDate = Get-CreateProjectCalibrationDate -Path $dir.FullName -SessionDate $sessionDateObj
+                    $dateDiff = Get-CreateProjectDateDiff `
+                        -CalibrationDate $calibDate `
+                        -SessionDate $sessionDateObj `
+                        -CalibrationPath $dir.FullName
 
-                $modePriority = if ($m -eq "Master") { 0 } else { 1 }
-                $display = $dir.FullName.Replace($cb, "").TrimStart("\")
-                $candidates += [PSCustomObject]@{
-                    Path         = $dir.FullName
-                    Mode         = $m
-                    Display      = $display
-                    Date         = $calibDate
-                    DateDiff     = $dateDiff
-                    ModePriority = $modePriority
+                    $modePriority = if ($m -eq "Master") { 0 } else { 1 }
+                    $display = $dir.FullName.Replace($cb, "").TrimStart("\")
+                    $candidates += [PSCustomObject]@{
+                        Path         = $dir.FullName
+                        Mode         = $m
+                        Display      = $display
+                        Date         = $calibDate
+                        DateDiff     = $dateDiff
+                        ModePriority = $modePriority
+                    }
                 }
             }
         }
@@ -1251,36 +1257,40 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
 
         # Collect all candidate flats from Master and Source and always show menu for user selection
         $avail = @()
-        # Write-Host "[DEBUG] Scanning flat folders in: $sessionCalibBase\*\flats\$telSetup" -ForegroundColor Cyan
+        # Scan every supported singular/plural flat folder under Master and Source.
         foreach($m in @("Master","Source")) {
-            $p = Join-Path -Path $sessionCalibBase -ChildPath "$m\flats\$telSetup"
-            if (Test-Path -LiteralPath $p -PathType Container) {
-                Get-ChildItem -LiteralPath $p -Directory -ErrorAction Stop | ForEach-Object {
-                    $item = $_ | Select-Object -Property Name, FullName
-                    $folderName = $item.Name
-                    Write-AsiToPixPathConventionWarning -Path $item.FullName -Context "flat calibration folder"
-                    $flatFilt = $null; $ang = $null; $warn = $false
-                    if ($folderName.Length -lt 8) {
-                        $warn = $true
-                        Write-Host "[!] Flat folder '$folderName' is too short to contain a yy.MM.dd date prefix" -ForegroundColor Red
-                    } else {
-                        $date = $folderName.Substring(0,8)
-                        $rest = $folderName.Substring(8).TrimStart()
-                        if ($rest -match '^(filt)?([^ _]+)') { $flatFilt = $Matches[2] }
-                        else { $warn = $true; Write-Host "[!] Flat folder '$folderName' does not match expected pattern (date filt<Filter> or date <Filter>)" -ForegroundColor Red }
-                        # Validate date
-                        $dateOk = $false
-                        $d = ParseDate $date
-                        if ($d) { $dateOk = $true } else { $dateOk = $false }
-                        if (-not $dateOk) { $warn = $true; Write-Host "[!] Invalid date in flat folder: $folderName" -ForegroundColor Red }
-                        # Validate filter
-                        if ($flatFilt -and ($knownFilters -notcontains $flatFilt)) { $warn = $true; Write-Host "[!] Unknown filter '$flatFilt' in flat folder: $folderName" -ForegroundColor Red }
-                        # Validate angle if present (optional)
-                        if ($folderName -match '(\d+)deg') { $ang = $Matches[1] } else { $ang = $null }
-                        if ($ang -and ($ang -notmatch '^\d+$')) { $warn = $true; Write-Host "[!] Invalid angle in flat folder: $folderName" -ForegroundColor Red }
-                        # Write-Host "[DEBUG] Found flat folder: $folderName | Filter: $flatFilt | Date: $date | Angle: $ang" -ForegroundColor Magenta
-                        $obj = [PSCustomObject]@{ Name = $item.Name; FullName = $item.FullName; Origin = $m }
-                        $avail += $obj
+            $modeRoot = Join-Path -Path $sessionCalibBase -ChildPath $m
+            foreach ($flatRoot in @(Get-AsiToPixChildFrameFolder -Path $modeRoot -Kind Flat)) {
+                $p = Join-Path -Path $flatRoot.FullName -ChildPath $telSetup
+                if (Test-Path -LiteralPath $p -PathType Container) {
+                    Get-ChildItem -LiteralPath $p -Directory -ErrorAction Stop | ForEach-Object {
+                        $item = $_ | Select-Object -Property Name, FullName
+                        $folderName = $item.Name
+                        Write-AsiToPixPathConventionWarning -Path $item.FullName -Context "flat calibration folder"
+                        $flatFilt = $null; $ang = $null; $warn = $false
+                        if ($folderName.Length -lt 8) {
+                            $warn = $true
+                            Write-Host "[!] Flat folder '$folderName' is too short to contain a yy.MM.dd date prefix" -ForegroundColor Red
+                        } else {
+                            $date = $folderName.Substring(0,8)
+                            $rest = $folderName.Substring(8).TrimStart()
+                            if ($rest -match '^(filt)?([^ _]+)') { $flatFilt = $Matches[2] }
+                            else { $warn = $true; Write-Host "[!] Flat folder '$folderName' does not match expected pattern (date filt<Filter> or date <Filter>)" -ForegroundColor Red }
+                            # Validate date
+                            $dateOk = $false
+                            $d = ParseDate $date
+                            if ($d) { $dateOk = $true } else { $dateOk = $false }
+                            if (-not $dateOk) { $warn = $true; Write-Host "[!] Invalid date in flat folder: $folderName" -ForegroundColor Red }
+                            # Validate filter
+                            if ($flatFilt -and ($knownFilters -notcontains $flatFilt)) { $warn = $true; Write-Host "[!] Unknown filter '$flatFilt' in flat folder: $folderName" -ForegroundColor Red }
+                            # Validate angle if present (optional)
+                            if ($folderName -match '(\d+)deg') { $ang = $Matches[1] } else { $ang = $null }
+                            if ($ang -and ($ang -notmatch '^\d+$')) { $warn = $true; Write-Host "[!] Invalid angle in flat folder: $folderName" -ForegroundColor Red }
+                            # Write-Host "[DEBUG] Found flat folder: $folderName | Filter: $flatFilt | Date: $date | Angle: $ang" -ForegroundColor Magenta
+                            $origin = Join-Path -Path $m -ChildPath $flatRoot.Name
+                            $obj = [PSCustomObject]@{ Name = $item.Name; FullName = $item.FullName; Origin = $origin }
+                            $avail += $obj
+                        }
                     }
                 }
             }
@@ -1673,7 +1683,7 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
 
         if ($fFound) {
             # Clean leading slash for flats display too
-            $fDisp = "$foundIn\flats\$telSetup\$($fFound.Name)"
+            $fDisp = Join-Path -Path $foundIn -ChildPath (Join-Path -Path $telSetup -ChildPath $fFound.Name)
             $flatTag = "Session_${sessionDate}_Filter_${filt}_Target_${targetGrp}_Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Cam_${sessionCamFull}"
             $pendingLinks += [PSCustomObject]@{
                 Type        = "Flats"
@@ -1820,10 +1830,13 @@ Write-CreateProjectDuplicateCalibrationWarning -PendingLink $pendingLinks
 <#
 Write-Host "`n--- DEBUG: ALL FLAT FOLDERS ---" -ForegroundColor Magenta
 foreach($m in @("Master","Source")) {
-    $p = "$sessionCalibBase\$m\flats\$telSetup"
-    if (Test-Path $p) {
-        Get-ChildItem $p -Directory | ForEach-Object {
-            Write-Host $_.Name
+    $modeRoot = Join-Path -Path $sessionCalibBase -ChildPath $m
+    foreach ($flatRoot in @(Get-AsiToPixChildFrameFolder -Path $modeRoot -Kind Flat)) {
+        $setupFlatRoot = Join-Path -Path $flatRoot.FullName -ChildPath $telSetup
+        if (Test-Path -LiteralPath $setupFlatRoot -PathType Container) {
+            Get-ChildItem -LiteralPath $setupFlatRoot -Directory | ForEach-Object {
+                Write-Host $_.Name
+            }
         }
     }
 }
@@ -1933,11 +1946,25 @@ foreach ($cam in $camMap.Keys) {
     # Calibration folders: look for Master roots for each camera
     $calibrationRoot = Join-Path -Path $baseZ -ChildPath "Calibration"
     $calibBase = Join-Path -Path $calibrationRoot -ChildPath $cam
-    $calibFolders = @{
-        Darks = Join-Path $calibBase "Master\darks"
-        Biases = Join-Path $calibBase "Master\biases"
-        Flats = Join-Path $calibBase "Master\flats"
-        FlatDarks = Join-Path $calibBase "Master\flat-darks"
+    $masterRoot = Join-Path -Path $calibBase -ChildPath "Master"
+    $calibFolders = @{}
+    foreach ($folderEntry in @(
+        @{ Property = "Darks"; Kind = "Dark" },
+        @{ Property = "Biases"; Kind = "Bias" },
+        @{ Property = "Flats"; Kind = "Flat" },
+        @{ Property = "FlatDarks"; Kind = "FlatDark" }
+    )) {
+        $existingFolders = @(Get-AsiToPixChildFrameFolder -Path $masterRoot -Kind $folderEntry.Kind)
+        if ($existingFolders.Count -gt 1) {
+            throw "Multiple $($folderEntry.Property) folders were found under '$masterRoot': $($existingFolders.FullName -join ', ')."
+        }
+
+        $calibFolders[$folderEntry.Property] = if ($existingFolders.Count -eq 1) {
+            $existingFolders[0].FullName
+        } else {
+            $canonicalFolder = Get-AsiToPixCanonicalFrameFolderName -Kind $folderEntry.Kind
+            Join-Path -Path $masterRoot -ChildPath $canonicalFolder
+        }
     }
     $meta.Cameras += @{
         Name = $cam

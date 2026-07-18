@@ -5,7 +5,11 @@ Describe "Project calibration metadata" {
     It "uses flat-darks as the project Source folder name" {
         Get-AsiToPixProjectSourceFolderName -Type "FlatDarks" | Should Be "flat-darks"
         Get-AsiToPixProjectSourceFolderName -Type "flat-darks" | Should Be "flat-darks"
-        Get-AsiToPixProjectSourceFolderName -Type "Darks" | Should Be "Darks"
+        Get-AsiToPixProjectSourceFolderName -Type "Darks" | Should Be "darks"
+        Get-AsiToPixProjectSourceFolderName -Type "dArK" | Should Be "darks"
+        Get-AsiToPixProjectSourceFolderName -Type "BIASES" | Should Be "biases"
+        Get-AsiToPixProjectSourceFolderName -Type "fLaT" | Should Be "flats"
+        Get-AsiToPixProjectSourceFolderName -Type "LIGHT" | Should Be "lights"
     }
 
     It "maps a Source calibration folder to the equivalent Master destination" {

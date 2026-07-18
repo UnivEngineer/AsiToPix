@@ -1,3 +1,6 @@
+$frameFoldersModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.FrameFolders.psm1"
+Import-Module $frameFoldersModule -Force
+
 function Test-AsiToPixPathHasCyrillicC {
     param(
         [AllowEmptyString()]
@@ -60,7 +63,8 @@ function Get-AsiToPixPathConventionIssue {
 
     $normalizedPath = ConvertTo-AsiToPixLatinCPath -Path $Path
     $escapedSeparator = '[\\/]'
-    $flatCalibrationPattern = "Calibration${escapedSeparator}[^\\/]+${escapedSeparator}(?:Master|Source)${escapedSeparator}flats(?:${escapedSeparator}|$)"
+    $flatFolderPattern = Get-AsiToPixFrameFolderRegex -Kind Flat
+    $flatCalibrationPattern = "(?i:Calibration)${escapedSeparator}[^\\/]+${escapedSeparator}(?i:Master|Source)${escapedSeparator}${flatFolderPattern}(?:${escapedSeparator}|$)"
     $isFlatCalibrationPath = $normalizedPath -match $flatCalibrationPattern
 
     foreach ($segment in ($Path -split '[\\/]')) {
@@ -105,7 +109,11 @@ function Get-AsiToPixPathConventionIssue {
         }
     }
 
-    $calibrationPattern = "Calibration${escapedSeparator}[^\\/]+${escapedSeparator}(?<mode>Master|Source)${escapedSeparator}(?<kind>darks|biases|flat-darks)${escapedSeparator}(?<next>[^\\/]+)"
+    $biasFolderPattern = Get-AsiToPixFrameFolderRegex -Kind Bias
+    $darkFolderPattern = Get-AsiToPixFrameFolderRegex -Kind Dark
+    $flatDarkFolderPattern = Get-AsiToPixFrameFolderRegex -Kind FlatDark
+    $calibrationKindPattern = "(?:${biasFolderPattern}|${darkFolderPattern}|${flatDarkFolderPattern})"
+    $calibrationPattern = "(?i:Calibration)${escapedSeparator}[^\\/]+${escapedSeparator}(?<mode>(?i:Master|Source))${escapedSeparator}(?<kind>${calibrationKindPattern})${escapedSeparator}(?<next>[^\\/]+)"
     if ($normalizedPath -match $calibrationPattern -and $Matches["next"] -notmatch '^gain\d+$') {
         $mode = $Matches["mode"]
         $kind = $Matches["kind"]

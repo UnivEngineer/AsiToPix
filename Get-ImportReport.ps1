@@ -43,11 +43,11 @@ foreach ($path in $resolvedImportPaths) {
     Write-Host "[INFO] Import folder found: " -ForegroundColor Cyan -NoNewline
     Write-Host $path -ForegroundColor Green
 }
-Write-Host "[INFO] Scanning FITS files..." -ForegroundColor Yellow
+Write-Host "[INFO] Scanning supported image files..." -ForegroundColor Yellow
 
 $report = @(Get-AsiToPixImportReport -ImportPath $resolvedImportPaths -PromptForMissingData)
 if ($report.Count -eq 0) {
-    throw "No supported FITS light files found under Import folder(s): $($resolvedImportPaths -join ', ')"
+    throw "No supported light image files found under Import folder(s): $($resolvedImportPaths -join ', ')"
 }
 
 $totalFrames = ($report | Measure-Object -Property FrameCount -Sum).Sum

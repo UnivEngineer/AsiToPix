@@ -6,6 +6,9 @@ Import-Module $environmentModule
 $projectMetadataModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.ProjectMetadata.psm1"
 Import-Module $projectMetadataModule
 
+$frameFoldersModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.FrameFolders.psm1"
+Import-Module $frameFoldersModule -Force
+
 function Get-AsiToPixObjectPropertyValue {
     param(
         [AllowNull()]
@@ -328,16 +331,25 @@ function Get-AsiToPixCalibrationFolder {
         throw "CalibrationFolders.$Category is missing for camera '$cameraName', and no AstroPhoto root was provided."
     }
 
-    $categoryFolder = switch ($Category) {
-        "Biases" { "biases" }
-        "Darks" { "darks" }
-        "Flats" { "flats" }
-        "FlatDarks" { "flat-darks" }
+    $folderKind = switch ($Category) {
+        "Biases" { "Bias" }
+        "Darks" { "Dark" }
+        "Flats" { "Flat" }
+        "FlatDarks" { "FlatDark" }
     }
     $cameraName = [string](Get-AsiToPixObjectPropertyValue -InputObject $CameraMetadata -Name "Name")
     $calibrationRoot = Join-Path -Path $AstroPhotoRoot -ChildPath "Calibration"
     $cameraRoot = Join-Path -Path $calibrationRoot -ChildPath $cameraName
     $masterRoot = Join-Path -Path $cameraRoot -ChildPath "Master"
+    $existingFolders = @(Get-AsiToPixChildFrameFolder -Path $masterRoot -Kind $folderKind)
+    if ($existingFolders.Count -gt 1) {
+        throw "Multiple $Category folders were found under '$masterRoot': $($existingFolders.FullName -join ', ')."
+    }
+    if ($existingFolders.Count -eq 1) {
+        return $existingFolders[0].FullName
+    }
+
+    $categoryFolder = Get-AsiToPixCanonicalFrameFolderName -Kind $folderKind
     return (Join-Path -Path $masterRoot -ChildPath $categoryFolder)
 }
 
@@ -462,17 +474,16 @@ function Get-AsiToPixProjectSourceRecord {
 
     $records = [System.Collections.Generic.List[object]]::new()
     foreach ($category in @("Biases", "Darks", "Flats", "FlatDarks")) {
-        $sourceFolderNames = @(Get-AsiToPixProjectSourceFolderName -Type $category)
-        if ($category -eq "FlatDarks") {
-            $sourceFolderNames += "FlatDarks"
+        $folderKind = switch ($category) {
+            "Biases" { "Bias" }
+            "Darks" { "Dark" }
+            "Flats" { "Flat" }
+            "FlatDarks" { "FlatDark" }
         }
+        $categoryFolders = @(Get-AsiToPixChildFrameFolder -Path $ProjectSourcePath -Kind $folderKind)
 
-        foreach ($sourceFolderName in @($sourceFolderNames | Select-Object -Unique)) {
-            $categoryPath = Join-Path -Path $ProjectSourcePath -ChildPath $sourceFolderName
-            if (-not (Test-Path -LiteralPath $categoryPath -PathType Container)) {
-                continue
-            }
-
+        foreach ($categoryFolder in $categoryFolders) {
+            $categoryPath = $categoryFolder.FullName
             foreach ($link in @(Get-ChildItem -LiteralPath $categoryPath -Directory -Force -ErrorAction Stop)) {
                 try {
                     $tag = Get-AsiToPixSourceTagInfo -Name $link.Name -Category $category

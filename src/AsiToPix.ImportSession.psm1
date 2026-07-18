@@ -3,6 +3,9 @@ Set-StrictMode -Version Latest
 $imageFilesModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.ImageFiles.psm1"
 Import-Module $imageFilesModule -Force
 
+$frameFoldersModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.FrameFolders.psm1"
+Import-Module $frameFoldersModule -Force
+
 function ConvertTo-AsiToPixPathSegment {
     param(
         [AllowEmptyString()]
@@ -620,11 +623,11 @@ function Get-AsiToPixDetectedTelescope {
 
     $current = $directory
     while ($null -ne $current) {
-        if ($current.Name -in @("Light", "Lights") -and $null -ne $current.Parent) {
+        if ((Test-AsiToPixFrameFolderName -Name $current.Name -Kind Light) -and $null -ne $current.Parent) {
             return $current.Parent.Name
         }
 
-        if ($null -ne $current.Parent -and $current.Parent.Name -in @("Light", "Lights")) {
+        if ($null -ne $current.Parent -and (Test-AsiToPixFrameFolderName -Name $current.Parent.Name -Kind Light)) {
             if ($null -ne $current.Parent.Parent) {
                 return $current.Parent.Parent.Name
             }
@@ -647,7 +650,8 @@ function Get-AsiToPixDetectedObject {
         $directory = Get-Item -LiteralPath (Split-Path -Path $directory.FullName -Parent)
     }
 
-    if ($directory.Name -notin @("Light", "Lights", "Good", "Trash")) {
+    if (-not (Test-AsiToPixFrameFolderName -Name $directory.Name -Kind Light) -and
+        $directory.Name -notin @("Good", "Trash")) {
         return $directory.Name
     }
 
@@ -796,8 +800,7 @@ function Find-AsiToPixImportSession {
     $sessions = @()
 
     foreach ($setupFolder in Get-ChildItem -LiteralPath $resolvedImportRoot -Directory -ErrorAction Stop) {
-        $lightFolders = @(Get-ChildItem -LiteralPath $setupFolder.FullName -Directory -ErrorAction Stop |
-            Where-Object { $_.Name -in @("Light", "Lights") })
+        $lightFolders = @(Get-AsiToPixChildFrameFolder -Path $setupFolder.FullName -Kind Light)
 
         foreach ($lightFolder in $lightFolders) {
             $objectFolders = @(Get-ChildItem -LiteralPath $lightFolder.FullName -Directory -ErrorAction Stop)

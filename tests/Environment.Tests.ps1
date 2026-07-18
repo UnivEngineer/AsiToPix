@@ -52,6 +52,20 @@ Describe "Environment path typo warnings" {
         }
     }
 
+    It "recognizes singular and mixed-case flat calibration folders" {
+        $paths = @(
+            "C:\AstroPhoto\Calibration\ASI2600MM\MASTER\fLaT\APO120 @ 0.8x\60s",
+            "C:\AstroPhoto\Calibration\ASI2600MM\source\FLATS\APO120 @ 0.8x\60s"
+        )
+
+        foreach ($path in $paths) {
+            $exposureIssues = @(Get-AsiToPixPathConventionIssue -Path $path | Where-Object {
+                $_.Message -match "Exposure"
+            })
+            $exposureIssues.Count | Should Be 0
+        }
+    }
+
     It "suggests temperature folders without spaces" {
         $path = "C:\AstroPhoto\Calibration\ASI2600MC\Master\biases\Gain120\-10 C\26.07"
 
@@ -66,5 +80,14 @@ Describe "Environment path typo warnings" {
         $issue = Get-AsiToPixPathConventionIssue -Path $path | Where-Object { $_.Kind -eq "LegacyCalibrationLayout" }
 
         $issue.Suggestion | Should Be "C:\AstroPhoto\Calibration\ASI2600MC\Source\darks\Gain120\-10C\180sec\26.07\Dark_180.0s_Bin1_2600MC_gain120_20260709-063548_185deg_-10.0C_SQA55_0003.fit"
+    }
+
+    It "warns about legacy singular mixed-case calibration layouts" {
+        $path = "C:\AstroPhoto\Calibration\ASI2600MC\source\DaRk\-10C\180sec\26.07"
+
+        $issue = Get-AsiToPixPathConventionIssue -Path $path | Where-Object { $_.Kind -eq "LegacyCalibrationLayout" }
+
+        $issue | Should Not BeNullOrEmpty
+        $issue.Suggestion | Should Match 'Gain<gain>'
     }
 }

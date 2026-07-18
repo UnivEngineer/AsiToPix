@@ -6,6 +6,9 @@ Import-Module $importSessionModule -Force
 $imageFilesModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.ImageFiles.psm1"
 Import-Module $imageFilesModule -Force
 
+$frameFoldersModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.FrameFolders.psm1"
+Import-Module $frameFoldersModule -Force
+
 function ConvertTo-AsiToPixReportFilter {
     param(
         [AllowEmptyString()]
@@ -163,8 +166,7 @@ function Get-AsiToPixImportReport {
 
         $resolvedRoot = (Resolve-Path -LiteralPath $root -ErrorAction Stop).ProviderPath
         foreach ($setupDirectory in Get-ChildItem -LiteralPath $resolvedRoot -Directory -ErrorAction Stop) {
-            $lightFolders = @(Get-ChildItem -LiteralPath $setupDirectory.FullName -Directory -ErrorAction Stop |
-                Where-Object { $_.Name -in @("Light", "Lights") })
+            $lightFolders = @(Get-AsiToPixChildFrameFolder -Path $setupDirectory.FullName -Kind Light)
             $objectDirectories = @($lightFolders | ForEach-Object {
                 Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction Stop
             })

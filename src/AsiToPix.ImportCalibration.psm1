@@ -3,6 +3,9 @@ Set-StrictMode -Version Latest
 $imageFilesModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.ImageFiles.psm1"
 Import-Module $imageFilesModule -Force
 
+$frameFoldersModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.FrameFolders.psm1"
+Import-Module $frameFoldersModule -Force
+
 function Read-AsiToPixCalibrationValue {
     param(
         [Parameter(Mandatory = $true)]
@@ -118,12 +121,13 @@ function Get-AsiToPixCalibrationCategoryName {
         [string]$FolderName
     )
 
-    switch -Regex ($FolderName) {
-        '^(?i:bias|biases)$' { return "Bias" }
-        '^(?i:dark|darks)$' { return "Dark" }
-        '^(?i:flat|flats)$' { return "Flat" }
-        default { return $null }
+    foreach ($kind in @("Bias", "Dark", "Flat")) {
+        if (Test-AsiToPixFrameFolderName -Name $FolderName -Kind $kind) {
+            return $kind
+        }
     }
+
+    return $null
 }
 
 function ConvertFrom-AsiToPixCalibrationFileName {
@@ -394,7 +398,8 @@ function Get-AsiToPixCalibrationDestinationFolder {
             $folderName = "$folderName ${canonicalAngle}deg"
         }
 
-        $flatRoot = Join-Path -Path $cameraSourceRoot -ChildPath "flats"
+        $flatFolderName = Get-AsiToPixCanonicalFrameFolderName -Kind Flat
+        $flatRoot = Join-Path -Path $cameraSourceRoot -ChildPath $flatFolderName
         $setupRoot = Join-Path -Path $flatRoot -ChildPath $SetupName
         return (Join-Path -Path $setupRoot -ChildPath $folderName)
     }
@@ -418,7 +423,11 @@ function Get-AsiToPixCalibrationDestinationFolder {
 
     $canonicalGain = ConvertTo-AsiToPixCalibrationNumericText -Value $resolvedGain -ValueName "gain/ISO"
     $temperatureFolder = Get-AsiToPixCalibrationTemperatureFolder -TemperatureC $resolvedTemperature
-    $kindName = if ($SourceRecord.Category -eq "Bias") { "biases" } else { "darks" }
+    $kindName = if ($SourceRecord.Category -eq "Bias") {
+        Get-AsiToPixCanonicalFrameFolderName -Kind Bias
+    } else {
+        Get-AsiToPixCanonicalFrameFolderName -Kind Dark
+    }
     $kindRoot = Join-Path -Path $cameraSourceRoot -ChildPath $kindName
     $gainRoot = Join-Path -Path $kindRoot -ChildPath "gain$canonicalGain"
     $temperatureRoot = Join-Path -Path $gainRoot -ChildPath $temperatureFolder

@@ -64,7 +64,8 @@ Describe "Import report" {
         @(
             "Light_47 Tuc_180.0s_Bin1_2600MM_L_gain120_20260710-051612_50deg_-10.0C_APO120_0001.fit",
             "Light_NGC 104_300.0s_Bin1_2600MM_L_gain120_20260710-061612_50deg_-10.0C_APO120_0002.fit",
-            "Light_47 Tuc_180.0s_Bin1_2600MM_L_gain120_20260711-131612_50deg_-10.0C_APO120_0003.fit"
+            "Light_47 Tuc_180.0s_Bin1_2600MM_L_gain120_20260711-131612_50deg_-10.0C_APO120_0003.fit",
+            "Light_47 Tuc_180.0s_Bin1_2600MM_L_gain120_20260711-131612_50deg_-10.0C_APO120_0003_thn.jpg"
         ) | ForEach-Object {
             New-Item -ItemType File -Path (Join-Path -Path $objectPath -ChildPath $_) | Out-Null
         }
@@ -105,7 +106,7 @@ Describe "Import report" {
 
     It "scans a plural Lights folder and shared non-FITS formats" {
         $importPath = Join-Path -Path $TestDrive -ChildPath "plural-lights"
-        $objectPath = Join-Path -Path $importPath -ChildPath "SQA55 @ 1.0x\Lights\M 31"
+        $objectPath = Join-Path -Path $importPath -ChildPath "SQA55 @ 1.0x\lIgHtS\M 31"
         New-Item -ItemType Directory -Path $objectPath -Force | Out-Null
         @(
             "Light_M31_120.0s_Bin1_2600MC_gain120_20260717-193952_0deg_-10.0C_SQA55_0001.xisf",

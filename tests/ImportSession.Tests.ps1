@@ -165,6 +165,7 @@ Describe "ImportSession parsing" {
         $objectFolder = Join-Path -Path $importRoot -ChildPath "APO120 @ 0.8x\Lights\M 16"
         New-Item -ItemType Directory -Path $objectFolder -Force | Out-Null
         New-Item -ItemType File -Path (Join-Path -Path $objectFolder -ChildPath "Light_M 16_180.0s_Bin1_2600MC_gain120_20260716-193952_180deg_-10.3C_APO120_0001.fit") | Out-Null
+        New-Item -ItemType File -Path (Join-Path -Path $objectFolder -ChildPath "Light_M 16_180.0s_Bin1_2600MC_gain120_20260716-193952_180deg_-10.3C_APO120_0001_thn.jpg") | Out-Null
 
         $sessions = @(Find-AsiToPixImportSession -ImportRoot $importRoot)
 

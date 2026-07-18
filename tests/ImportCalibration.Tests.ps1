@@ -35,6 +35,9 @@ Describe "Calibration filename parsing" {
             Get-AsiToPixCalibrationCategoryName -FolderName "darks" | Should Be "Dark"
             Get-AsiToPixCalibrationCategoryName -FolderName "flat" | Should Be "Flat"
             Get-AsiToPixCalibrationCategoryName -FolderName "flats" | Should Be "Flat"
+            Get-AsiToPixCalibrationCategoryName -FolderName "BiAsEs" | Should Be "Bias"
+            Get-AsiToPixCalibrationCategoryName -FolderName "DaRkS" | Should Be "Dark"
+            Get-AsiToPixCalibrationCategoryName -FolderName "FlAtS" | Should Be "Flat"
         }
     }
 

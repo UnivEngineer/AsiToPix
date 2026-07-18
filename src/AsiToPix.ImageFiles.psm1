@@ -42,11 +42,25 @@ function Test-AsiToPixRawImageFileName {
     return ($script:AsiToPixRawImageExtensions -contains $extension)
 }
 
+function Test-AsiToPixThumbnailImageFileName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FileName
+    )
+
+    $leafName = [System.IO.Path]::GetFileName($FileName)
+    return $leafName.EndsWith("_thn.jpg", [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Test-AsiToPixSupportedImageFileName {
     param(
         [Parameter(Mandatory = $true)]
         [string]$FileName
     )
+
+    if (Test-AsiToPixThumbnailImageFileName -FileName $FileName) {
+        return $false
+    }
 
     $lowerName = [System.IO.Path]::GetFileName($FileName).ToLowerInvariant()
     foreach ($suffix in $script:AsiToPixCompressedFitsSuffixes) {
@@ -88,4 +102,5 @@ Export-ModuleMember -Function `
     Get-AsiToPixRawImageExtension, `
     Get-AsiToPixSupportedImageExtension, `
     Test-AsiToPixRawImageFileName, `
-    Test-AsiToPixSupportedImageFileName
+    Test-AsiToPixSupportedImageFileName, `
+    Test-AsiToPixThumbnailImageFileName

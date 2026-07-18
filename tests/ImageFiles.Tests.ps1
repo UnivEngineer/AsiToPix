@@ -40,6 +40,13 @@ Describe "Shared PixInsight image formats" {
         Test-AsiToPixSupportedImageFileName -FileName "notes.txt" | Should Be $false
     }
 
+    It "rejects ASIAir thumbnail JPEG files but keeps ordinary JPEG images" {
+        Test-AsiToPixThumbnailImageFileName -FileName "Light_M16_180s_0001_thn.jpg" | Should Be $true
+        Test-AsiToPixSupportedImageFileName -FileName "Light_M16_180s_0001_thn.jpg" | Should Be $false
+        Test-AsiToPixSupportedImageFileName -FileName "LIGHT_M16_180S_0001_THN.JPG" | Should Be $false
+        Test-AsiToPixSupportedImageFileName -FileName "Light_M16_180s_0001.jpg" | Should Be $true
+    }
+
     It "removes compound and single image extensions" {
         Get-AsiToPixImageFileStem -FileName "Light_M31_180s_20260718-010203.fts.gz" |
             Should Be "Light_M31_180s_20260718-010203"

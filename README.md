@@ -34,15 +34,16 @@ ASIAir archive + calibration library
 
 | Component | Purpose |
 | --- | --- |
-| `ImportSession.ps1` | Imports one light session into the canonical ASIAir archive using copies or file symlinks. |
-| `ImportAll.ps1` | Finds and imports every light session under an `Import` staging tree. |
-| `ImportCalibration.ps1` | Copies bias, dark, and flat frames into the canonical calibration `Source` tree. |
-| `Get-ImportReport.ps1` | Reports frame counts, per-night exposure expressions, and integration time from staging folders; can emit TSV. |
-| `CreateProject.ps1` | Selects lights and matching calibration data, then creates a WBPP-ready project with directory symlinks or copied files. |
+| `ImportSession.ps1` | Imports one light session in any supported PixInsight image format using copies or file symlinks. |
+| `ImportAll.ps1` | Finds and imports every light session under an `Import` staging tree. Both `light` and `lights` folders are accepted. |
+| `ImportCalibration.ps1` | Copies bias, dark, and flat frames in any supported image format into the canonical calibration `Source` tree. |
+| `Get-ImportReport.ps1` | Reports frame counts, per-night exposure expressions, and integration time from supported images in staging folders; can emit TSV. |
+| `CreateProject.ps1` | Selects supported light images and matching calibration data, then creates a WBPP-ready project with directory symlinks or copied files. |
 | `ExportMasters.ps1` | Plans and interactively copies, renames, or replaces WBPP `.xisf` masters in the calibration `Master` tree. |
 | `CombineSeasons.ps1` | Combines the `Source` trees of selected processing projects into `Combined\Source`. |
 | `Init.cmd` | Configures the current-user PowerShell execution policy and, when elevated, Windows symlink evaluation and long-path support. |
 | `Run-CreateProject.cmd` | Launches `CreateProject.ps1` with `pwsh`, falling back to Windows PowerShell. |
+| `src\AsiToPix.ImageFiles.psm1` | Defines the shared, case-insensitive PixInsight image extension list and compound-extension handling used by frame scanners. |
 | `src\*.psm1` | Reusable path, environment, import, report, metadata, and master-export logic. |
 | `tests\*.Tests.ps1` | Pester tests for the reusable modules and script conventions. |
 
@@ -56,6 +57,20 @@ ASIAir archive + calibration library
 - Network symlink evaluation enabled when links cross local and network volumes.
 
 Paths may contain spaces and Unicode characters, but the current scripts warn about Cyrillic characters in paths because those paths are not supported by the workflow.
+
+## Supported image formats
+
+Light import, calibration import, import reports, and project creation all use the shared extension list in `src\AsiToPix.ImageFiles.psm1`. Extension matching is case-insensitive.
+
+- Astronomical formats: `.fit`, `.fits`, `.fts`, and `.xisf`.
+- Compressed FITS: `.fit.fz`, `.fits.fz`, `.fts.fz`, `.fit.gz`, `.fits.gz`, and `.fts.gz`.
+- TIFF, PNG, BMP, and Netpbm: `.tif`, `.tiff`, `.png`, `.bmp`, `.dib`, `.pbm`, `.pgm`, `.pnm`, and `.ppm`.
+- JPEG and JPEG 2000: `.jpe`, `.jpeg`, `.jpg`, `.j2c`, `.j2k`, `.jp2`, and `.jpc`.
+- Camera RAW: `.3fr`, `.ari`, `.arw`, `.bay`, `.bmq`, `.cap`, `.cine`, `.cr2`, `.cr3`, `.crw`, `.cs1`, `.dc2`, `.dcr`, `.dng`, `.erf`, `.fff`, `.gpr`, `.ia`, `.iiq`, `.k25`, `.kc2`, `.kdc`, `.mdc`, `.mef`, `.mos`, `.mrw`, `.nef`, `.nrw`, `.orf`, `.pef`, `.ptx`, `.pxn`, `.qtk`, `.raf`, `.raw`, `.rdc`, `.rw2`, `.rwl`, `.rwz`, `.sr2`, `.srf`, `.srw`, `.sti`, and `.x3f`.
+
+Format support means that a frame is discovered and can be reported, copied, or linked. Metadata is still derived primarily from ASIAir-style filenames. When a timestamp is missing, the file modification time is used; other missing values such as exposure or filter are requested when the workflow needs them.
+
+`ExportMasters.ps1` is intentionally separate from general frame discovery: WBPP calibration masters are expected to be `.xisf` files.
 
 ## Initial setup
 
@@ -97,10 +112,10 @@ AstroPhoto\Import\
 └── <setup>\
     └── Light\
         └── <object>\
-            └── *.fit / *.fits / supported camera RAW files
+            └── files in any supported image format
 ```
 
-`ImportAll.ps1` also recognizes a `Lights` folder. `Get-ImportReport.ps1` currently reads the singular `Light` layout and FIT/FITS files only.
+`Light` and `Lights` are interchangeable, case-insensitive folder names for `ImportSession.ps1`, `ImportAll.ps1`, and `Get-ImportReport.ps1`.
 
 Imported lights are organized as:
 
@@ -119,7 +134,7 @@ AstroPhoto\ASIAir\
 
 The exposure suffix is added only when a filter/night contains mixed exposure lengths. Existing filenames found anywhere under `Good` or `Trash` are not imported again; a filename already in `Trash` remains excluded.
 
-FITS metadata is read from ASIAir-style filenames. Common camera RAW formats are also accepted for lights, with file timestamps used when capture timestamps are unavailable. Missing object, setup, camera, or filter information is requested interactively.
+Metadata is read from ASIAir-style filenames regardless of the image container format. File timestamps are used when capture timestamps are unavailable. Missing object, setup, camera, exposure, or filter information is requested interactively.
 
 ### Night dates
 
@@ -133,7 +148,7 @@ For example, captures at `2026-07-19 02:30` and `2026-07-18 22:00` both belong t
 
 ### Calibration library
 
-`ImportCalibration.ps1` expects its source root to contain `bias`/`biases`, `dark`/`darks`, or `flat`/`flats` folders directly below it. FIT, FITS, and ARW files are supported.
+`ImportCalibration.ps1` expects its source root to contain `bias`/`biases`, `dark`/`darks`, or `flat`/`flats` folders directly below it. These singular/plural aliases are case-insensitive. Every image format listed in [Supported image formats](#supported-image-formats) is accepted in those folders.
 
 The generated library follows this shape:
 
@@ -225,7 +240,7 @@ Import one session instead:
     -ImportMode Symlink
 ```
 
-`SourcePath` may be a folder, a supported light file, or an object name that can be resolved under an `AstroPhoto\Import` tree. Copy is the interactive default.
+`SourcePath` may be a folder, a light file in any supported image format, or an object name that can be resolved under an `AstroPhoto\Import` tree. Copy is the interactive default.
 
 ### 3. Import calibration frames
 
@@ -255,7 +270,7 @@ Or use `Run-CreateProject.cmd`.
 The script:
 
 1. Finds the `AstroPhoto` root.
-2. Accepts a light folder, a FITS file, or an object name from the ASIAir archive.
+2. Accepts a light folder, a supported image file, or an object name from the ASIAir archive.
 3. Confirms the detected object, season, scope, and project path.
 4. Scans all filter/night folders for that object and setup.
 5. Selects matching master or source calibration folders and asks for flat choices where necessary.

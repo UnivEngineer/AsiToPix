@@ -203,6 +203,18 @@ Write a pipeline-friendly TSV report:
     Set-Content -LiteralPath '.\import-report.tsv' -Encoding UTF8
 ```
 
+Copy the complete TSV table to the clipboard for direct paste into Google Sheets:
+
+```powershell
+.\Get-ImportReport.ps1 -ImportPath 'D:\AstroPhoto\Import' -Tsv | Set-Clipboard
+```
+
+TSV exposure cells are Google Sheets formulas beginning with `=`; filters without frames are emitted as empty cells.
+The TSV data columns are `Catalog number`, `Name`, `Exposure`, `RGB`, `L`, `R`, `G`, `B`, `HO`, `SO`, `Ha`, `OIII`, and `SII`.
+The console report remains compact and uses the `RGB`, `L`, `H`, `O`, and `S` columns.
+
+For each staged object, the report searches the sibling `AstroPhoto\ASIAir` library and matches either the catalog number or readable name against folders such as `M 16 - Eagle nebula`. Catalog compositions separated by `+`, such as `M 8 + M 20 - Lagoon + Trifid nebulae`, are matched by their complete catalog-number set and are not confused with an individual object such as `M 8`. The import workflows use the same matching convention. If no unique match is available, the report prints a warning and puts the original Import folder name in both TSV name columns.
+
 Multiple import roots can be supplied as an array:
 
 ```powershell

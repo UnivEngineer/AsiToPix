@@ -191,6 +191,9 @@ function ConvertTo-AsiToPixCalibrationSourceMetadata {
     )
 
     $records = [System.Collections.Generic.List[object]]::new()
+    $recordBySource = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
     foreach ($link in $PendingLink) {
         $type = [string](Get-AsiToPixMetadataPropertyValue -InputObject $link -Name "Type")
         if ($type -notin @("Biases", "Darks", "Flats", "FlatDarks")) {
@@ -231,6 +234,15 @@ function ConvertTo-AsiToPixCalibrationSourceMetadata {
         $filter = [string](Get-AsiToPixMetadataPropertyValue -InputObject $link -Name "Filter")
         $session = [string](Get-AsiToPixMetadataPropertyValue -InputObject $link -Name "Session")
         $target = [string](Get-AsiToPixMetadataPropertyValue -InputObject $link -Name "Target")
+        $flatSetId = [string](Get-AsiToPixMetadataPropertyValue -InputObject $link -Name "FlatSetId")
+        $binning = [string](Get-AsiToPixMetadataPropertyValue -InputObject $link -Name "Binning")
+        $setup = [string](Get-AsiToPixMetadataPropertyValue -InputObject $link -Name "Setup")
+        $angle = [string](Get-AsiToPixMetadataPropertyValue -InputObject $link -Name "Angle")
+        $lightSessions = @(
+            Get-AsiToPixMetadataPropertyValue -InputObject $link -Name "LightSessions" |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+                Sort-Object -Unique
+        )
 
         if ($type -in @("Darks", "FlatDarks") -and
             ($null -eq $gain -or $null -eq $temperature -or $null -eq $exposure)) {
@@ -245,11 +257,28 @@ function ConvertTo-AsiToPixCalibrationSourceMetadata {
         }
 
         $destination = Resolve-AsiToPixCalibrationDestination -SourcePath $sourcePath -MasterRoot $masterRoot
-        $records.Add([PSCustomObject][ordered]@{
+        $canonicalSourcePath = [string](Get-AsiToPixMetadataPropertyValue -InputObject $link -Name "CanonicalSourcePath")
+        if ([string]::IsNullOrWhiteSpace($canonicalSourcePath)) {
+            $canonicalSourcePath = [System.IO.Path]::GetFullPath($sourcePath)
+        } else {
+            $canonicalSourcePath = [System.IO.Path]::GetFullPath($canonicalSourcePath)
+        }
+        $sourceKey = "$type|$canonicalSourcePath"
+        if ($recordBySource.ContainsKey($sourceKey)) {
+            $existingRecord = $recordBySource[$sourceKey]
+            $existingRecord.LightSessions = @(
+                @($existingRecord.LightSessions) + $lightSessions |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+                    Sort-Object -Unique
+            )
+            continue
+        }
+
+        $record = [PSCustomObject][ordered]@{
             Type              = $type
             Camera            = $cameraName
             SourceMode        = $destination.SourceMode
-            SourcePath        = [System.IO.Path]::GetFullPath($sourcePath)
+            SourcePath        = $canonicalSourcePath
             DestinationFolder = $destination.DestinationFolder
             Gain              = $gain
             TemperatureC      = $temperature
@@ -257,8 +286,15 @@ function ConvertTo-AsiToPixCalibrationSourceMetadata {
             Filter            = if ([string]::IsNullOrWhiteSpace($filter)) { $null } else { $filter.ToUpperInvariant() }
             Session           = if ([string]::IsNullOrWhiteSpace($session)) { $null } else { $session }
             Target            = if ([string]::IsNullOrWhiteSpace($target)) { $null } else { $target }
+            FlatSetId         = if ([string]::IsNullOrWhiteSpace($flatSetId)) { $null } else { $flatSetId }
+            Binning           = if ([string]::IsNullOrWhiteSpace($binning)) { $null } else { $binning }
+            Setup             = if ([string]::IsNullOrWhiteSpace($setup)) { $null } else { $setup }
+            Angle             = if ([string]::IsNullOrWhiteSpace($angle)) { $null } else { $angle }
+            LightSessions     = $lightSessions
             Tag               = $tag
-        })
+        }
+        $records.Add($record)
+        $recordBySource.Add($sourceKey, $record)
     }
 
     return @($records | Sort-Object Type, Camera, DestinationFolder, Tag)

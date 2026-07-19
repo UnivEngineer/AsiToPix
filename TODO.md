@@ -72,6 +72,9 @@
 - [ ] После каждого изменения показывать `git diff`.
 ## Recent fixes
 
+- [x] Match `+`-separated catalog compositions by the complete object list in import selection and TSV catalog/name resolution, so `M 8` and `M 8 + M 20` are not ambiguous.
+- [x] `CreateProject.ps1`: deduplicate flat links and project metadata by the case-insensitive canonical physical source path; remove light session/exposure from flat tags and add optional stable `FLATSET` identity for compatibility collisions.
+- [x] `Get-ImportReport.ps1`: emit full Google Sheets TSV columns, including characteristic `Exposure`, with `=` formulas; resolve catalog/name pairs from the sibling ASIAir library, warn and fall back on missing or ambiguous matches, and return one clipboard-safe multiline string.
 - [x] `CreateProject.ps1`: normalize fractional temperatures independently of the Windows decimal separator so values such as `-9.8C` still select the `-10C` dark/bias folders.
 - [x] `CreateProject.ps1`: convert millisecond flat exposures to seconds before matching flat-darks (`490ms` -> `0.49s`).
 - [x] `CreateProject.ps1`: show the number of supported light frames for every session in the final project tree.

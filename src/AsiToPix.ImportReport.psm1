@@ -9,6 +9,9 @@ Import-Module $imageFilesModule -Force
 $frameFoldersModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.FrameFolders.psm1"
 Import-Module $frameFoldersModule -Force
 
+$namesModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.Names.psm1"
+Import-Module $namesModule -Force
+
 function ConvertTo-AsiToPixReportFilter {
     param(
         [AllowEmptyString()]
@@ -138,6 +141,133 @@ function Format-AsiToPixExposureExpression {
     return $terms -join "+"
 }
 
+function ConvertTo-AsiToPixTsvFilter {
+    param(
+        [AllowEmptyString()]
+        [string]$FilterName
+    )
+
+    switch -Regex ($FilterName.Trim()) {
+        '^(|None|RGB|Color|Colour)$' { return "RGB" }
+        '^(L|Lum|Luminance|IRC|Trib)$' { return "L" }
+        '^(R|Red)$' { return "R" }
+        '^(G|Green)$' { return "G" }
+        '^(B|Blue)$' { return "B" }
+        '^(HO|UHC)$' { return "HO" }
+        '^SO$' { return "SO" }
+        '^(H|Ha|HAlpha|H-Alpha)$' { return "Ha" }
+        '^(O|OII|OIII|O3)$' { return "OIII" }
+        '^(S|SII|S2)$' { return "SII" }
+        default { return $null }
+    }
+}
+
+function ConvertTo-AsiToPixTsvExpression {
+    param(
+        [AllowEmptyString()]
+        [string]$Expression
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Expression) -or $Expression -eq "-") {
+        return ""
+    }
+
+    if ($Expression.StartsWith("=", [System.StringComparison]::Ordinal)) {
+        return $Expression
+    }
+
+    return "=$Expression"
+}
+
+function Get-AsiToPixArchiveObjectIndex {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ImportRoot
+    )
+
+    $astroPhotoRoot = Split-Path -Path $ImportRoot -Parent
+    $archivePath = Join-Path -Path $astroPhotoRoot -ChildPath "ASIAir"
+    if (-not (Test-Path -LiteralPath $archivePath -PathType Container)) {
+        return [PSCustomObject]@{
+            ArchivePath = $archivePath
+            Exists      = $false
+            Records     = @()
+        }
+    }
+
+    $records = foreach ($directory in Get-ChildItem -LiteralPath $archivePath -Directory -ErrorAction Stop) {
+        if ($directory.Name -notmatch '^(?<catalog>.+?)\s+-\s+(?<name>.+)$') {
+            continue
+        }
+
+        $catalogNumber = $Matches["catalog"].Trim()
+        $objectName = $Matches["name"].Trim()
+        if ([string]::IsNullOrWhiteSpace($catalogNumber) -or [string]::IsNullOrWhiteSpace($objectName)) {
+            continue
+        }
+
+        [PSCustomObject]@{
+            FolderName    = $directory.Name
+            CatalogNumber = $catalogNumber
+            Name          = $objectName
+        }
+    }
+
+    return [PSCustomObject]@{
+        ArchivePath = (Resolve-Path -LiteralPath $archivePath -ErrorAction Stop).ProviderPath
+        Exists      = $true
+        Records     = @($records | Sort-Object FolderName)
+    }
+}
+
+function Resolve-AsiToPixTsvObjectName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ObjectName,
+
+        [Parameter(Mandatory = $true)]
+        [object]$ArchiveIndex
+    )
+
+    $fallback = [PSCustomObject]@{
+        CatalogNumber = $ObjectName
+        Name          = $ObjectName
+        IsResolved    = $false
+        Warning       = ""
+    }
+
+    if (-not $ArchiveIndex.Exists) {
+        $fallback.Warning = "ASIAir library not found at '$($ArchiveIndex.ArchivePath)' while resolving import object '$ObjectName'. Using the import folder name for both TSV columns."
+        return $fallback
+    }
+
+    $records = @($ArchiveIndex.Records)
+    $folderNames = @($records | Select-Object -ExpandProperty FolderName)
+    $nameMatches = @(Get-AsiToPixNameMatch -DetectedName $ObjectName -Candidates $folderNames)
+    if ($nameMatches.Count -eq 0) {
+        $fallback.Warning = "No ASIAir library object matching '$ObjectName' was found under '$($ArchiveIndex.ArchivePath)'. Using the import folder name for both TSV columns."
+        return $fallback
+    }
+
+    if ($nameMatches.Count -gt 1) {
+        $fallback.Warning = "Ambiguous ASIAir library match for import object '$ObjectName' under '$($ArchiveIndex.ArchivePath)': $($nameMatches.Name -join ', '). Using the import folder name for both TSV columns."
+        return $fallback
+    }
+
+    $matchedRecord = @($records | Where-Object { $_.FolderName -eq $nameMatches[0].Name })
+    if ($matchedRecord.Count -ne 1) {
+        $fallback.Warning = "Could not parse the ASIAir library match '$($nameMatches[0].Name)' for import object '$ObjectName'. Using the import folder name for both TSV columns."
+        return $fallback
+    }
+
+    return [PSCustomObject]@{
+        CatalogNumber = $matchedRecord[0].CatalogNumber
+        Name          = $matchedRecord[0].Name
+        IsResolved    = $true
+        Warning       = ""
+    }
+}
+
 function Get-AsiToPixImportRoot {
     $roots = foreach ($drive in Get-PSDrive -PSProvider FileSystem) {
         $astroPhotoPath = Join-Path -Path $drive.Root -ChildPath "AstroPhoto"
@@ -199,14 +329,16 @@ function Get-AsiToPixImportReport {
                         continue
                     }
 
-                    $reportFilter = ConvertTo-AsiToPixReportFilter -FilterName $info.FilterName
-                    if ($null -eq $reportFilter) {
+                    $tsvFilter = ConvertTo-AsiToPixTsvFilter -FilterName $info.FilterName
+                    if ($null -eq $tsvFilter) {
                         Write-Warning "Skipping image file with unsupported filter '$($info.FilterName)': $($file.FullName)"
                         continue
                     }
+                    $reportFilter = ConvertTo-AsiToPixReportFilter -FilterName $info.FilterName
 
                     [PSCustomObject]@{
                         Filter          = $reportFilter
+                        TsvFilter       = $tsvFilter
                         ExposureSeconds = [decimal]::Parse(
                             $info.ExposureSeconds,
                             [System.Globalization.NumberStyles]::Number,
@@ -234,6 +366,12 @@ function Get-AsiToPixImportReport {
                     }
                 }
 
+                $tsvCells = [ordered]@{}
+                foreach ($filter in @("RGB", "L", "R", "G", "B", "HO", "SO", "Ha", "OIII", "SII")) {
+                    $filterFrames = @($frames | Where-Object TsvFilter -EQ $filter)
+                    $tsvCells[$filter] = Format-AsiToPixExposureExpression -Frame $filterFrames -BaseExposure $baseExposure
+                }
+
                 $integrationSeconds = [decimal](($frames | Measure-Object -Property ExposureSeconds -Sum).Sum)
 
                 [PSCustomObject]@{
@@ -248,6 +386,16 @@ function Get-AsiToPixImportReport {
                     H                 = $cells["H"]
                     O                 = $cells["O"]
                     S                 = $cells["S"]
+                    TsvRGB            = $tsvCells["RGB"]
+                    TsvL              = $tsvCells["L"]
+                    TsvR              = $tsvCells["R"]
+                    TsvG              = $tsvCells["G"]
+                    TsvB              = $tsvCells["B"]
+                    TsvHO             = $tsvCells["HO"]
+                    TsvSO             = $tsvCells["SO"]
+                    TsvHa             = $tsvCells["Ha"]
+                    TsvOIII           = $tsvCells["OIII"]
+                    TsvSII            = $tsvCells["SII"]
                     RGBSeconds        = $filterSeconds["RGB"]
                     LSeconds          = $filterSeconds["L"]
                     HSeconds          = $filterSeconds["H"]
@@ -280,6 +428,8 @@ function Get-AsiToPixImportReportLine {
     }
     $lines = [System.Collections.Generic.List[string]]::new()
     $setupGroups = @($rows | Group-Object ImportRoot, Setup)
+    $archiveIndexes = @{}
+    $objectResolutions = @{}
 
     for ($setupIndex = 0; $setupIndex -lt $setupGroups.Count; $setupIndex++) {
         if ($setupIndex -gt 0) {
@@ -289,11 +439,39 @@ function Get-AsiToPixImportReportLine {
         $setup = $setupGroups[$setupIndex].Group[0].Setup
         $setupCells = @($setup -split '\s+@\s+', 2)
         $lines.Add($setupCells -join "`t")
-        $lines.Add(@("Object", "Expo", "RGB", "L", "H", "O", "S") -join "`t")
+        $lines.Add(@("Catalog number", "Name", "Exposure", "RGB", "L", "R", "G", "B", "HO", "SO", "Ha", "OIII", "SII") -join "`t")
 
         foreach ($row in $setupGroups[$setupIndex].Group) {
+            $importRootKey = [string]$row.ImportRoot
+            if (-not $archiveIndexes.ContainsKey($importRootKey)) {
+                $archiveIndexes[$importRootKey] = Get-AsiToPixArchiveObjectIndex -ImportRoot $importRootKey
+            }
+            $resolutionKey = "$importRootKey`n$($row.Object)"
+            if (-not $objectResolutions.ContainsKey($resolutionKey)) {
+                $objectResolutions[$resolutionKey] = Resolve-AsiToPixTsvObjectName `
+                    -ObjectName $row.Object `
+                    -ArchiveIndex $archiveIndexes[$importRootKey]
+                if (-not $objectResolutions[$resolutionKey].IsResolved) {
+                    Write-Warning $objectResolutions[$resolutionKey].Warning
+                }
+            }
+            $objectResolution = $objectResolutions[$resolutionKey]
             $exposureText = ConvertTo-AsiToPixReportNumber -Value $row.Exposure
-            $lines.Add(@($row.Object, $exposureText, $row.RGB, $row.L, $row.H, $row.O, $row.S) -join "`t")
+            $filterCells = @(
+                $row.TsvRGB,
+                $row.TsvL,
+                $row.TsvR,
+                $row.TsvG,
+                $row.TsvB,
+                $row.TsvHO,
+                $row.TsvSO,
+                $row.TsvHa,
+                $row.TsvOIII,
+                $row.TsvSII
+            ) | ForEach-Object {
+                ConvertTo-AsiToPixTsvExpression -Expression $_
+            }
+            $lines.Add((@($objectResolution.CatalogNumber, $objectResolution.Name, $exposureText) + $filterCells) -join "`t")
         }
     }
 
@@ -419,6 +597,8 @@ function Get-AsiToPixIntegrationSummaryPrettyLine {
 }
 
 Export-ModuleMember -Function `
+    ConvertTo-AsiToPixTsvFilter, `
+    ConvertTo-AsiToPixTsvExpression, `
     ConvertTo-AsiToPixReportFilter, `
     Format-AsiToPixHourMinute, `
     Format-AsiToPixIntegrationTime, `
@@ -428,4 +608,6 @@ Export-ModuleMember -Function `
     Get-AsiToPixImportReportLine, `
     Get-AsiToPixImportReportPrettyLine, `
     Get-AsiToPixIntegrationSummaryPrettyLine, `
-    Get-AsiToPixImportRoot
+    Get-AsiToPixImportRoot, `
+    Get-AsiToPixArchiveObjectIndex, `
+    Resolve-AsiToPixTsvObjectName

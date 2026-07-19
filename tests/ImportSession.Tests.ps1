@@ -310,6 +310,17 @@ Describe "ImportSession parsing" {
         $nameMatches[0].Name | Should Be "M 16 - Eagle nebula"
     }
 
+    It "distinguishes a catalog composition from each individual object" {
+        $nameMatches = @(Get-AsiToPixNameMatch -DetectedName "M 8 + M 20" -Candidates @(
+            "M 8 - Lagoon nebula",
+            "M 8 + M 20 - Lagoon + Trifid nebulae",
+            "M 20 - Trifid nebula"
+        ))
+
+        $nameMatches.Count | Should Be 1
+        $nameMatches[0].Name | Should Be "M 8 + M 20 - Lagoon + Trifid nebulae"
+    }
+
     It "returns an empty filename set as a usable object" {
         $emptyFolder = Join-Path -Path $TestDrive -ChildPath "empty"
         $env:ASITOPIX_EMPTY_TEST_FOLDER = $emptyFolder

@@ -71,6 +71,47 @@ Describe "Project calibration metadata" {
         $metadata[0].DestinationFolder | Should Be $sourcePath
     }
 
+    It "stores one metadata record for repeated uses of one canonical flat source" {
+        $cameraRoot = Join-Path -Path $TestDrive -ChildPath "Calibration\ASI2600MM"
+        $masterRoot = Join-Path -Path $cameraRoot -ChildPath "Master\flats"
+        $sourcePath = Join-Path -Path $cameraRoot -ChildPath "Source\flats\SQA55 @ 1.0x\26.07.15 H 180deg"
+        $camera = [PSCustomObject]@{
+            Name = "ASI2600MM"
+            CalibrationFolders = [PSCustomObject]@{ Flats = $masterRoot }
+        }
+        $common = @{
+            Type = "Flats"
+            Tag = "FlatSet_abc123_Filter_H_Target_H_Gain_120_Temp_-10C_Cam_ASI2600MM"
+            Src = $sourcePath
+            CanonicalSourcePath = $sourcePath
+            Cam = "ASI2600MM"
+            Gain = "120"
+            Temperature = "-10C"
+            Exposure = "0.81s"
+            Filter = "H"
+            Session = "26.07.15"
+            Target = "H"
+            FlatSetId = "abc123"
+            Binning = "1"
+            Setup = "SQA55 @ 1.0x"
+            Angle = "180deg"
+        }
+        $first = [PSCustomObject]$common.Clone()
+        $first | Add-Member -NotePropertyName LightSessions -NotePropertyValue @("26.07.15-180s")
+        $second = [PSCustomObject]$common.Clone()
+        $second | Add-Member -NotePropertyName LightSessions -NotePropertyValue @("26.07.15-300s")
+
+        $metadata = @(
+            ConvertTo-AsiToPixCalibrationSourceMetadata `
+                -PendingLink @($first, $second) `
+                -CameraMetadata @($camera)
+        )
+
+        $metadata.Count | Should Be 1
+        $metadata[0].LightSessions.Count | Should Be 2
+        $metadata[0].FlatSetId | Should Be "abc123"
+    }
+
     It "rejects calibration sources outside the configured Source and Master roots" {
         $cameraRoot = Join-Path -Path $TestDrive -ChildPath "Calibration\ASI2600MM"
         $masterRoot = Join-Path -Path $cameraRoot -ChildPath "Master\darks"

@@ -8,6 +8,17 @@ Describe "Import report" {
         ConvertTo-AsiToPixReportFilter -FilterName "Ha" | Should Be "H"
         ConvertTo-AsiToPixReportFilter -FilterName "SII" | Should Be "S"
         ConvertTo-AsiToPixReportFilter -FilterName "OIII" | Should Be "O"
+
+        ConvertTo-AsiToPixTsvFilter -FilterName "None" | Should Be "RGB"
+        ConvertTo-AsiToPixTsvFilter -FilterName "L" | Should Be "L"
+        ConvertTo-AsiToPixTsvFilter -FilterName "R" | Should Be "R"
+        ConvertTo-AsiToPixTsvFilter -FilterName "G" | Should Be "G"
+        ConvertTo-AsiToPixTsvFilter -FilterName "B" | Should Be "B"
+        ConvertTo-AsiToPixTsvFilter -FilterName "UHC" | Should Be "HO"
+        ConvertTo-AsiToPixTsvFilter -FilterName "SO" | Should Be "SO"
+        ConvertTo-AsiToPixTsvFilter -FilterName "H" | Should Be "Ha"
+        ConvertTo-AsiToPixTsvFilter -FilterName "O" | Should Be "OIII"
+        ConvertTo-AsiToPixTsvFilter -FilterName "S" | Should Be "SII"
     }
 
     It "chooses the exposure used by the largest number of subs" {
@@ -58,9 +69,20 @@ Describe "Import report" {
         Format-AsiToPixHourMinute -Seconds 90 | Should Be "0:02"
     }
 
+    It "formats TSV exposure formulas and empty cells for Google Sheets" {
+        ConvertTo-AsiToPixTsvExpression -Expression "(84+59)*60+1*120+1*180" |
+            Should Be "=(84+59)*60+1*120+1*180"
+        ConvertTo-AsiToPixTsvExpression -Expression "-" | Should Be ""
+        ConvertTo-AsiToPixTsvExpression -Expression "" | Should Be ""
+    }
+
     It "builds a tab-separated report from an Import tree" {
-        $objectPath = Join-Path -Path $TestDrive -ChildPath "APO120 @ 0.8x\Light\47 Tuc"
+        $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "report-tree\AstroPhoto"
+        $importPath = Join-Path -Path $astroPhotoRoot -ChildPath "Import"
+        $objectPath = Join-Path -Path $importPath -ChildPath "APO120 @ 0.8x\Light\47 Tuc"
+        $archiveObjectPath = Join-Path -Path $astroPhotoRoot -ChildPath "ASIAir\NGC 104 - 47 Tuc"
         New-Item -ItemType Directory -Path $objectPath -Force | Out-Null
+        New-Item -ItemType Directory -Path $archiveObjectPath -Force | Out-Null
         @(
             "Light_47 Tuc_180.0s_Bin1_2600MM_L_gain120_20260710-051612_50deg_-10.0C_APO120_0001.fit",
             "Light_NGC 104_300.0s_Bin1_2600MM_L_gain120_20260710-061612_50deg_-10.0C_APO120_0002.fit",
@@ -70,13 +92,13 @@ Describe "Import report" {
             New-Item -ItemType File -Path (Join-Path -Path $objectPath -ChildPath $_) | Out-Null
         }
 
-        $lines = @(Get-AsiToPixImportReportLine -ImportPath $TestDrive)
+        $lines = @(Get-AsiToPixImportReportLine -ImportPath $importPath)
 
         $lines[0] | Should Be "APO120`t0.8x"
-        $lines[1] | Should Be "Object`tExpo`tRGB`tL`tH`tO`tS"
-        $lines[2] | Should Be "47 Tuc`t180`t-`t(1+1)*180+1*300`t-`t-`t-"
+        $lines[1] | Should Be (@("Catalog number", "Name", "Exposure", "RGB", "L", "R", "G", "B", "HO", "SO", "Ha", "OIII", "SII") -join "`t")
+        $lines[2] | Should Be (@("NGC 104", "47 Tuc", "180", "", "=(1+1)*180+1*300", "", "", "", "", "", "", "", "") -join "`t")
 
-        $report = @(Get-AsiToPixImportReport -ImportPath $TestDrive)
+        $report = @(Get-AsiToPixImportReport -ImportPath $importPath)
         $report[0].FrameCount | Should Be 3
         $report[0].IntegrationSeconds | Should Be ([decimal]660)
         $report[0].LSeconds | Should Be ([decimal]660)
@@ -85,6 +107,102 @@ Describe "Import report" {
         $summaryLines[0] | Should Be "APO120  0.8x"
         $summaryLines[1] | Should Be "Object  L"
         $summaryLines[2] | Should Be "47 Tuc  0:11"
+    }
+
+    It "emits TSV as one clipboard-safe multiline string" {
+        $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "clipboard-tsv\AstroPhoto"
+        $importPath = Join-Path -Path $astroPhotoRoot -ChildPath "Import"
+        $objectPath = Join-Path -Path $importPath -ChildPath "APO120 @ 0.8x\Light\M 16"
+        $archiveObjectPath = Join-Path -Path $astroPhotoRoot -ChildPath "ASIAir\M 16 - Eagle nebula"
+        New-Item -ItemType Directory -Path $objectPath -Force | Out-Null
+        New-Item -ItemType Directory -Path $archiveObjectPath -Force | Out-Null
+        New-Item -ItemType File -Path (Join-Path -Path $objectPath -ChildPath "Light_M16_180.0s_Bin1_2600MM_H_gain120_20260710-051612_0deg_-10.0C_APO120_0001.fit") | Out-Null
+        $scriptPath = Join-Path -Path $PSScriptRoot -ChildPath "..\Get-ImportReport.ps1"
+
+        $output = @(& $scriptPath -ImportPath $importPath -Tsv)
+
+        $output.Count | Should Be 1
+        $header = @("Catalog number", "Name", "Exposure", "RGB", "L", "R", "G", "B", "HO", "SO", "Ha", "OIII", "SII") -join "`t"
+        $dataRow = @("M 16", "Eagle nebula", "180", "", "", "", "", "", "", "", "=1*180", "", "") -join "`t"
+        $output[0] | Should Be "APO120`t0.8x`r`n$header`r`n$dataRow"
+    }
+
+    It "uses the import folder name for both TSV name columns when archive matching is ambiguous" {
+        $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "ambiguous-name\AstroPhoto"
+        $importPath = Join-Path -Path $astroPhotoRoot -ChildPath "Import"
+        $objectPath = Join-Path -Path $importPath -ChildPath "APO120 @ 0.8x\Light\Eagle"
+        New-Item -ItemType Directory -Path $objectPath -Force | Out-Null
+        New-Item -ItemType File -Path (Join-Path -Path $objectPath -ChildPath "Light_Eagle_180.0s_Bin1_2600MM_H_gain120_20260710-051612_0deg_-10.0C_APO120_0001.fit") | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path -Path $astroPhotoRoot -ChildPath "ASIAir\M 16 - Eagle nebula") -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path -Path $astroPhotoRoot -ChildPath "ASIAir\IC 4703 - Eagle nebula") -Force | Out-Null
+
+        $index = Get-AsiToPixArchiveObjectIndex -ImportRoot $importPath
+        $resolution = Resolve-AsiToPixTsvObjectName -ObjectName "Eagle" -ArchiveIndex $index
+
+        $resolution.IsResolved | Should Be $false
+        $resolution.CatalogNumber | Should Be "Eagle"
+        $resolution.Name | Should Be "Eagle"
+        $resolution.Warning | Should Match "Ambiguous"
+        $resolution.Warning | Should Match "M 16 - Eagle nebula"
+        $resolution.Warning | Should Match "IC 4703 - Eagle nebula"
+
+        $warnings = @()
+        $lines = @(Get-AsiToPixImportReportLine -ImportPath $importPath -WarningVariable warnings -WarningAction SilentlyContinue)
+        $warnings.Count | Should Be 1
+        [string]$warnings[0] | Should Match "Ambiguous"
+        $lines[2] | Should Be (@("Eagle", "Eagle", "180", "", "", "", "", "", "", "", "=1*180", "", "") -join "`t")
+    }
+
+    It "resolves a catalog composition without matching an individual object" {
+        $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "composition-name\AstroPhoto"
+        $importPath = Join-Path -Path $astroPhotoRoot -ChildPath "Import"
+        New-Item -ItemType Directory -Path $importPath -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path -Path $astroPhotoRoot -ChildPath "ASIAir\M 8 - Lagoon nebula") -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path -Path $astroPhotoRoot -ChildPath "ASIAir\M 8 + M 20 - Lagoon + Trifid nebulae") -Force | Out-Null
+
+        $index = Get-AsiToPixArchiveObjectIndex -ImportRoot $importPath
+        $resolution = Resolve-AsiToPixTsvObjectName -ObjectName "M 8 + M 20" -ArchiveIndex $index
+
+        $resolution.IsResolved | Should Be $true
+        $resolution.CatalogNumber | Should Be "M 8 + M 20"
+        $resolution.Name | Should Be "Lagoon + Trifid nebulae"
+        $resolution.Warning | Should Be ""
+    }
+
+    It "keeps every full TSV filter separate while the console report stays compact" {
+        $importPath = Join-Path -Path $TestDrive -ChildPath "full-filters"
+        $objectPath = Join-Path -Path $importPath -ChildPath "APO120 @ 0.8x\Light\Filter test"
+        New-Item -ItemType Directory -Path $objectPath -Force | Out-Null
+        $filterFiles = @(
+            @{ Camera = "2600MC"; Filter = ""; Index = "01" },
+            @{ Camera = "2600MM"; Filter = "L"; Index = "02" },
+            @{ Camera = "2600MM"; Filter = "R"; Index = "03" },
+            @{ Camera = "2600MM"; Filter = "G"; Index = "04" },
+            @{ Camera = "2600MM"; Filter = "B"; Index = "05" },
+            @{ Camera = "2600MC"; Filter = "HO"; Index = "06" },
+            @{ Camera = "2600MC"; Filter = "SO"; Index = "07" },
+            @{ Camera = "2600MM"; Filter = "H"; Index = "08" },
+            @{ Camera = "2600MM"; Filter = "O"; Index = "09" },
+            @{ Camera = "2600MM"; Filter = "S"; Index = "10" }
+        )
+        foreach ($item in $filterFiles) {
+            $filterToken = if ([string]::IsNullOrWhiteSpace($item.Filter)) { "" } else { "_$($item.Filter)" }
+            $fileName = "Light_Filter test_60.0s_Bin1_$($item.Camera)${filterToken}_gain120_20260710-05$($item.Index)12_0deg_-10.0C_APO120_00$($item.Index).fit"
+            New-Item -ItemType File -Path (Join-Path -Path $objectPath -ChildPath $fileName) | Out-Null
+        }
+
+        $report = @(Get-AsiToPixImportReport -ImportPath $importPath)
+
+        $report.Count | Should Be 1
+        $report[0].FrameCount | Should Be 10
+        foreach ($propertyName in @("TsvRGB", "TsvL", "TsvR", "TsvG", "TsvB", "TsvHO", "TsvSO", "TsvHa", "TsvOIII", "TsvSII")) {
+            $report[0].$propertyName | Should Be "1*60"
+        }
+        $report[0].RGB | Should Be "1*60"
+        $report[0].L | Should Be "1*60"
+        $report[0].H | Should Be "1*60"
+        $report[0].O | Should Be "1*60"
+        $report[0].S | Should Be "1*60"
     }
 
     It "includes misplaced OSC lights with a Dark filename prefix" {

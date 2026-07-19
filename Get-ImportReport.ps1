@@ -34,7 +34,9 @@ $resolvedImportPaths = foreach ($path in $ImportPath) {
 $resolvedImportPaths = @($resolvedImportPaths | Sort-Object -Unique)
 
 if ($Tsv) {
-    Get-AsiToPixImportReportLine -ImportPath $resolvedImportPaths
+    $tsvLines = @(Get-AsiToPixImportReportLine -ImportPath $resolvedImportPaths)
+    $tsvText = $tsvLines -join "`r`n"
+    Write-Output $tsvText
     return
 }
 

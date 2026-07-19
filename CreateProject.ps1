@@ -15,6 +15,9 @@ Import-Module $pathsModule -Force
 $projectMetadataModule = Join-Path $PSScriptRoot "src\AsiToPix.ProjectMetadata.psm1"
 Import-Module $projectMetadataModule -Force
 
+$projectPlanModule = Join-Path $PSScriptRoot "src\AsiToPix.ProjectPlan.psm1"
+Import-Module $projectPlanModule -Force
+
 $imageFilesModule = Join-Path $PSScriptRoot "src\AsiToPix.ImageFiles.psm1"
 Import-Module $imageFilesModule -Force
 
@@ -858,6 +861,38 @@ function ConvertTo-CreateProjectExposureNumber {
     return $value.ToString("0.########", [System.Globalization.CultureInfo]::InvariantCulture)
 }
 
+function Write-CreateProjectFlatPlanWarning {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$FlatPlan
+    )
+
+    $duplicateGroups = @($FlatPlan.DuplicateGroups)
+    if ($duplicateGroups.Count -gt 0) {
+        Write-Host "`n[!] Reused flat sets were deduplicated by canonical source path." -ForegroundColor Yellow
+        foreach ($group in $duplicateGroups) {
+            Write-Host "    $($group.Count) planned links -> 1 logical flat set" -ForegroundColor Yellow
+            Write-Host "      Source: $($group.CanonicalSourcePath)" -ForegroundColor DarkGray
+            Write-Host "      Light sessions: $($group.LightSessions -join ', ')" -ForegroundColor DarkGray
+            Write-Host "      Tag: $($group.Tag)" -ForegroundColor DarkGray
+        }
+    }
+
+    $separateSetGroups = @($FlatPlan.SeparateSetGroups)
+    if ($separateSetGroups.Count -eq 0) {
+        return
+    }
+
+    Write-Host "`n[!] Multiple physical flat sets have the same compatibility parameters." -ForegroundColor Yellow
+    Write-Host "    They remain separate. Add FLATSET to WBPP pre keywords to keep them distinct." -ForegroundColor Yellow
+    foreach ($group in $separateSetGroups) {
+        Write-Host "    Compatibility: $($group.CompatibilityKey)" -ForegroundColor DarkGray
+        foreach ($flatSet in $group.FlatSets) {
+            Write-Host "      FlatSet_$($flatSet.FlatSetId): $($flatSet.CanonicalSourcePath)" -ForegroundColor DarkGray
+        }
+    }
+}
+
 function ConvertTo-CreateProjectTemperatureFolderName {
     param(
         [Parameter(Mandatory = $true)]
@@ -1200,10 +1235,11 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
         Write-Host "  [$sessionCamFull/$sessionCamType] $sessionDate | Filter: $rawFilt -> $filt | Target: $targetGrp | Angle: $angDisp" -ForegroundColor Green
 
         $roundT = ConvertTo-CreateProjectTemperatureFolderName -Temperature $curTemp
-        $sTag = "Session_${sessionDate}_Filter_${filt}_Target_${targetGrp}_Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Cam_${sessionCamFull}"
+        $flatSetId = "NONE"
+        $sTag = "Session_${sessionDate}_FlatSet_${flatSetId}_Filter_${filt}_Target_${targetGrp}_Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Cam_${sessionCamFull}"
         $cTag = "Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Cam_${sessionCamFull}"
 
-        $pendingLinks += [PSCustomObject]@{
+        $lightPendingLink = [PSCustomObject]@{
             Type        = "Lights"
             Tag         = $sTag
             Src         = $dFolder.FullName
@@ -1216,7 +1252,9 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
             Session     = $sessionDate
             Target      = $targetGrp
             FrameCount  = $imageFiles.Count
+            FlatSetId   = $flatSetId
         }
+        $pendingLinks += $lightPendingLink
 
         # --- FLATS SEARCH ---
         # Build list of all raw filter names that map to the same normalized filter,
@@ -1714,19 +1752,87 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
         if ($fFound) {
             # Clean leading slash for flats display too
             $fDisp = Join-Path -Path $foundIn -ChildPath (Join-Path -Path $telSetup -ChildPath $fFound.Name)
-            $flatTag = "Session_${sessionDate}_Filter_${filt}_Target_${targetGrp}_Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Cam_${sessionCamFull}"
+            $canonicalFlatPath = Resolve-AsiToPixCanonicalSourcePath -Path $fFound.FullName
+            $flatSetId = Get-AsiToPixFlatSetId -SourcePath $canonicalFlatPath
+            $lightPendingLink.FlatSetId = $flatSetId
+            $lightPendingLink.Tag = "Session_${sessionDate}_FlatSet_${flatSetId}_Filter_${filt}_Target_${targetGrp}_Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Cam_${sessionCamFull}"
+
+            $flatDate = if ($fFound.Name -match '(?<!\d)(?<flatDate>\d{2}\.\d{2}\.\d{2,4})(?!\d)') {
+                $Matches['flatDate']
+            } else {
+                "Unknown"
+            }
+            $flatAngle = if ($fFound.Name -match '(?i)(?<!\d)(?<flatAngle>\d{1,3})\s*deg(?![A-Za-z])') {
+                "$($Matches['flatAngle'])deg"
+            } else {
+                "Unknown"
+            }
+
+            $fSample = Get-ChildItem -LiteralPath $fFound.FullName -File -ErrorAction Stop |
+                Where-Object { Test-AsiToPixSupportedImageFileName -FileName $_.Name } |
+                Select-Object -First 1
+            $flatBinning = if ($fSample -and $fSample.Name -match '(?i)(?:^|[_-])BIN(?:NING)?[-_]?(?<binning>\d+)(?=[_.-]|$)') {
+                $Matches['binning']
+            } else {
+                "Unknown"
+            }
+            $flatGain = if ($fSample -and $fSample.Name -match '(?i)(?:^|[_-])gain[-_]?(?<gain>\d+)(?=[_.-]|$)') {
+                $Matches['gain']
+            } else {
+                $curGain
+            }
+            $flatTempNumeric = $curTemp
+            if ($fSample -and $fSample.Name -match '(?i)(?:^|_)(?<temperature>-?\d+(?:\.\d+)?)C(?=[_.-]|$)') {
+                $flatTempNumeric = [double]::Parse(
+                    $Matches['temperature'],
+                    [System.Globalization.CultureInfo]::InvariantCulture
+                )
+            }
+            $flatTemperature = ConvertTo-CreateProjectTemperatureFolderName -Temperature $flatTempNumeric
+            $flatExposure = $null
+            if ($fSample -and $fSample.Name -match '(?i)(?:^|_)(?<flatExposure>\d+(?:\.\d+)?m?s)(?=[_.-]|$)') {
+                $flatExposure = "$(ConvertTo-CreateProjectExposureNumber -ExposureText $Matches['flatExposure'])s"
+            }
+
+            $flatTag = ConvertTo-AsiToPixFlatSetTag `
+                -FlatSetId $flatSetId `
+                -FlatDate $flatDate `
+                -Angle $flatAngle `
+                -Setup $telSetup `
+                -Binning $flatBinning `
+                -Filter $filt `
+                -Target $targetGrp `
+                -Gain $flatGain `
+                -Temperature $flatTemperature `
+                -Camera $sessionCamFull
+            $flatCompatibilityKey = @(
+                $sessionCamFull,
+                $flatBinning,
+                $filt,
+                $targetGrp,
+                $telSetup,
+                $flatGain,
+                $flatTemperature
+            ) -join '|'
             $pendingLinks += [PSCustomObject]@{
-                Type        = "Flats"
-                Tag         = $flatTag
-                Src         = $fFound.FullName
-                Display     = $fDisp
-                Cam         = $sessionCamFull
-                Gain        = $curGain
-                Temperature = $roundT
-                Exposure    = $curExp
-                Filter      = $filt
-                Session     = $sessionDate
-                Target      = $targetGrp
+                Type                 = "Flats"
+                Tag                  = $flatTag
+                Src                  = $fFound.FullName
+                CanonicalSourcePath  = $canonicalFlatPath
+                Display              = $fDisp
+                Cam                  = $sessionCamFull
+                Gain                 = $flatGain
+                Temperature          = $flatTemperature
+                Exposure             = $flatExposure
+                Filter               = $filt
+                Session              = $flatDate
+                LightSessions        = @($sessionDate)
+                Target               = $targetGrp
+                FlatSetId            = $flatSetId
+                Binning              = $flatBinning
+                Setup                = $telSetup
+                Angle                = $flatAngle
+                FlatCompatibilityKey = $flatCompatibilityKey
             }
 
             # Check for potential keyword conflicts in flat files
@@ -1749,26 +1855,25 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
             }
 
             # Flat-Darks
-            $fSample = Get-ChildItem -LiteralPath $fFound.FullName -File -ErrorAction Stop |
-                Where-Object { Test-AsiToPixSupportedImageFileName -FileName $_.Name } |
-                Select-Object -First 1
-            if ($fSample -and ($fSample.Name -match "_(?<flatExposure>\d+(?:\.\d+)?m?s)_")) {
-                $fdExp = "$(ConvertTo-CreateProjectExposureNumber -ExposureText $Matches['flatExposure'])s"
-                $fd = Get-CalibPath "FlatDarks" $curGain $curTemp $fdExp $sessionCalibBase $sessionDate
+            if (-not [string]::IsNullOrWhiteSpace($flatExposure)) {
+                $fdExp = $flatExposure
+                $flatSearchDate = if ($flatDate -eq "Unknown") { $sessionDate } else { $flatDate }
+                $fd = Get-CalibPath "FlatDarks" $flatGain $flatTempNumeric $fdExp $sessionCalibBase $flatSearchDate
                 if ($fd) {
-                    $fdTag = "Exp_${fdExp}_Gain_${curGain}_Temp_${roundT}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
+                    $fdTag = "FlatSet_${flatSetId}_Exp_${fdExp}_Gain_${flatGain}_Temp_${flatTemperature}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
                     $pendingLinks += [PSCustomObject]@{
                         Type        = "FlatDarks"
                         Tag         = $fdTag
                         Src         = $fd.Path
                         Display     = $fd.Display
                         Cam         = $sessionCamFull
-                        Gain        = $curGain
-                        Temperature = $roundT
+                        Gain        = $flatGain
+                        Temperature = $flatTemperature
                         Exposure    = $fdExp
                         Filter      = $filt
-                        Session     = $sessionDate
+                        Session     = $flatDate
                         Target      = $targetGrp
+                        FlatSetId   = $flatSetId
                     }
                     # Check for potential keyword conflicts in flat-dark files
                     $flatDarkFiles = Get-ChildItem -LiteralPath $fd.Path -File -ErrorAction SilentlyContinue |
@@ -1790,8 +1895,8 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
         }
 
         # --- DARKS & BIAS ---
-        $dTag = "Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
-        $bTag = "Gain_${curGain}_Temp_${roundT}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
+        $dTag = "FlatSet_${flatSetId}_Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
+        $bTag = "FlatSet_${flatSetId}_Gain_${curGain}_Temp_${roundT}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
 
         $d = Get-CalibPath "Darks" $curGain $curTemp $curExp $sessionCalibBase $sessionDate
         if ($d) {
@@ -1807,6 +1912,7 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
                 Filter      = $filt
                 Session     = $sessionDate
                 Target      = $targetGrp
+                FlatSetId   = $flatSetId
             }
         }
         
@@ -1823,10 +1929,15 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
                 Filter      = $filt
                 Session     = $sessionDate
                 Target      = $targetGrp
+                FlatSetId   = $flatSetId
             }
         }
     }
 }
+
+$flatPlan = Get-AsiToPixUniqueFlatPlan -PendingLink $pendingLinks
+$pendingLinks = @($flatPlan.PendingLinks)
+Write-CreateProjectFlatPlanWarning -FlatPlan $flatPlan
 
 # Print camera mapping summary
 Write-Host "`n--- CAMERA MAPPING SUMMARY ---" -ForegroundColor Cyan
@@ -1953,7 +2064,8 @@ Write-Host "  FILTER   : normalized filter name       (add to pre)" -ForegroundC
 Write-Host "  TARGET   : WBPP target group            (add to pre)" -ForegroundColor Yellow
 Write-Host "  GAIN     : gain                         (add to pre)" -ForegroundColor Yellow
 Write-Host "  TEMP     : sensor temperature           (add to pre)" -ForegroundColor Yellow
-Write-Host "  EXP      : exposure time                (add to pre)" -ForegroundColor Yellow
+Write-Host "  FLATSET  : physical flat-set identifier (add to pre only after a flat-set collision warning)" -ForegroundColor Gray
+Write-Host "  EXP      : optional custom grouping     (WBPP also reads image headers)" -ForegroundColor Gray
 Write-Host "If unsure, add CAM both pre and post. FILTER/TARGET should be present before integration selection (pre)." -ForegroundColor Gray
 
 Write-Host "`n--- IMPORTANT: Keyword Conflicts ---" -ForegroundColor Cyan

@@ -13,17 +13,19 @@ function ConvertTo-AsiToPixNameToken {
     return @($normalized.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries) | Select-Object -Unique)
 }
 
-function Get-AsiToPixCatalogIdentifier {
+function Get-AsiToPixCatalogIdentifierSet {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Name
     )
 
-    if ($Name -match '(?i)\b(?<catalog>M|NGC|IC|SH2|SH|LBN|LDN)\s*[- ]?\s*(?<number>\d+[A-Z]?)\b') {
-        return "$($Matches["catalog"].ToUpperInvariant()) $($Matches["number"].ToUpperInvariant())"
+    $identifiers = foreach ($match in [regex]::Matches(
+            $Name,
+            '(?i)\b(?<catalog>M|NGC|IC|SH2|SH|LBN|LDN)\s*[- ]?\s*(?<number>\d+[A-Z]?)\b')) {
+        "$($match.Groups['catalog'].Value.ToUpperInvariant()) $($match.Groups['number'].Value.ToUpperInvariant())"
     }
 
-    return ""
+    return @($identifiers | Sort-Object -Unique)
 }
 
 function Get-AsiToPixNameMatch {
@@ -46,7 +48,8 @@ function Get-AsiToPixNameMatch {
     $detectedLower = $detected.ToLowerInvariant()
     $detectedCompact = $detectedLower -replace '[^a-z0-9]+', ''
     $detectedTokens = @(ConvertTo-AsiToPixNameToken -Name $detected)
-    $detectedCatalogIdentifier = Get-AsiToPixCatalogIdentifier -Name $detected
+    $detectedCatalogIdentifiers = @(Get-AsiToPixCatalogIdentifierSet -Name $detected)
+    $detectedCatalogKey = $detectedCatalogIdentifiers -join '|'
 
     $nameMatches = foreach ($candidate in $Candidates) {
         if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
@@ -54,15 +57,16 @@ function Get-AsiToPixNameMatch {
         $candidateLower = $candidate.ToLowerInvariant()
         $candidateCompact = $candidateLower -replace '[^a-z0-9]+', ''
         $candidateTokens = @(ConvertTo-AsiToPixNameToken -Name $candidate)
-        $candidateCatalogIdentifier = Get-AsiToPixCatalogIdentifier -Name $candidate
+        $candidateCatalogIdentifiers = @(Get-AsiToPixCatalogIdentifierSet -Name $candidate)
+        $candidateCatalogKey = $candidateCatalogIdentifiers -join '|'
         $score = 0
 
-        if (-not [string]::IsNullOrWhiteSpace($detectedCatalogIdentifier)) {
-            if ($candidateCatalogIdentifier -ne $detectedCatalogIdentifier) {
+        if ($detectedCatalogIdentifiers.Count -gt 0) {
+            if ($candidateCatalogKey -ne $detectedCatalogKey) {
                 continue
             }
 
-            $score += 500
+            $score += 500 * $detectedCatalogIdentifiers.Count
         }
 
         if ($candidateLower -eq $detectedLower) {

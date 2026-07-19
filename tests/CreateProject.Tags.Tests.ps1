@@ -3,19 +3,33 @@ Describe "CreateProject WBPP calibration tags" {
     $scriptText = Get-Content -Path $scriptPath -Raw
 
     It "keeps real filter and target values for dark calibration tags" {
-        $scriptText | Should Match '\$dTag = "Gain_\$\{curGain\}_Temp_\$\{roundT\}_Exp_\$\{curExp\}_Target_\$\{targetGrp\}_Filter_\$\{filt\}_Cam_\$\{sessionCamFull\}"'
+        $scriptText | Should Match '\$dTag = "FlatSet_\$\{flatSetId\}_Gain_\$\{curGain\}_Temp_\$\{roundT\}_Exp_\$\{curExp\}_Target_\$\{targetGrp\}_Filter_\$\{filt\}_Cam_\$\{sessionCamFull\}"'
     }
 
     It "keeps real filter and target values for bias calibration tags" {
-        $scriptText | Should Match '\$bTag = "Gain_\$\{curGain\}_Temp_\$\{roundT\}_Target_\$\{targetGrp\}_Filter_\$\{filt\}_Cam_\$\{sessionCamFull\}"'
+        $scriptText | Should Match '\$bTag = "FlatSet_\$\{flatSetId\}_Gain_\$\{curGain\}_Temp_\$\{roundT\}_Target_\$\{targetGrp\}_Filter_\$\{filt\}_Cam_\$\{sessionCamFull\}"'
     }
 
-    It "keeps real session, filter, target, and exposure values for flat calibration tags" {
-        $scriptText | Should Match '\$flatTag = "Session_\$\{sessionDate\}_Filter_\$\{filt\}_Target_\$\{targetGrp\}_Gain_\$\{curGain\}_Temp_\$\{roundT\}_Exp_\$\{curExp\}_Cam_\$\{sessionCamFull\}"'
+    It "builds flat tags from the physical flat set without light session or exposure" {
+        $scriptText | Should Match '\$flatTag = ConvertTo-AsiToPixFlatSetTag'
+        $scriptText | Should Match '-FlatDate \$flatDate'
+        $scriptText | Should Match '-Angle \$flatAngle'
+        $scriptText | Should Match '-Binning \$flatBinning'
+        $scriptText | Should Not Match '\$flatTag = "Session_\$\{sessionDate\}'
+        $scriptText | Should Not Match '\$flatTag = .*Exp_\$\{curExp\}'
     }
 
     It "keeps real flat-dark calibration tag values" {
-        $scriptText | Should Match '\$fdTag = "Exp_\$\{fdExp\}_Gain_\$\{curGain\}_Temp_\$\{roundT\}_Target_\$\{targetGrp\}_Filter_\$\{filt\}_Cam_\$\{sessionCamFull\}"'
+        $scriptText | Should Match '\$fdTag = "FlatSet_\$\{flatSetId\}_Exp_\$\{fdExp\}_Gain_\$\{flatGain\}_Temp_\$\{flatTemperature\}_Target_\$\{targetGrp\}_Filter_\$\{filt\}_Cam_\$\{sessionCamFull\}"'
+    }
+
+    It "deduplicates planned flat links by canonical target before applying the project" {
+        $scriptText | Should Match 'Get-AsiToPixUniqueFlatPlan -PendingLink \$pendingLinks'
+        $scriptText | Should Match '\$pendingLinks = @\(\$flatPlan\.PendingLinks\)'
+        $scriptText | Should Match 'Write-CreateProjectFlatPlanWarning -FlatPlan \$flatPlan'
+        $scriptText | Should Match 'physical flat-set identifier'
+        $scriptText | Should Match 'FLATSET\s+: physical flat-set identifier \(add to pre only after a flat-set collision warning\)'
+        $scriptText | Should Match 'EXP\s+: optional custom grouping\s+\(WBPP also reads image headers\)'
     }
 
     It "reports repeated source calibration paths without changing link tags" {

@@ -6,6 +6,9 @@ Import-Module $environmentModule
 $projectMetadataModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.ProjectMetadata.psm1"
 Import-Module $projectMetadataModule
 
+$namesModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.Names.psm1"
+Import-Module $namesModule
+
 $frameFoldersModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.FrameFolders.psm1"
 Import-Module $frameFoldersModule -Force
 
@@ -304,6 +307,152 @@ function Read-AsiToPixProjectMetadata {
 
     Assert-AsiToPixProjectMetadata -Metadata $metadata -MetadataPath $resolvedPath
     return $metadata
+}
+
+function Find-AsiToPixProcessingProjectMetadata {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProcessingRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ObjectName
+    )
+
+    if (-not (Test-Path -LiteralPath $ProcessingRoot -PathType Container)) {
+        throw "AstroPhoto Processing folder not found: '$ProcessingRoot'."
+    }
+
+    $resolvedProcessingRoot = (Resolve-Path -LiteralPath $ProcessingRoot -ErrorAction Stop).ProviderPath
+    $objectFolders = @(Get-ChildItem -LiteralPath $resolvedProcessingRoot -Directory -ErrorAction Stop)
+    $objectMatches = @(Get-AsiToPixNameMatch `
+        -DetectedName $ObjectName `
+        -Candidates @($objectFolders | Select-Object -ExpandProperty Name))
+    if ($objectMatches.Count -eq 0) {
+        return @()
+    }
+
+    $projects = foreach ($objectMatch in $objectMatches) {
+        $objectFolder = $objectFolders |
+            Where-Object { $_.Name -eq $objectMatch.Name } |
+            Select-Object -First 1
+        if ($null -eq $objectFolder) {
+            continue
+        }
+
+        foreach ($metadataFile in @(Get-ChildItem `
+            -LiteralPath $objectFolder.FullName `
+            -File `
+            -Filter "project_meta.json" `
+            -Recurse `
+            -ErrorAction Stop)) {
+            [PSCustomObject]@{
+                ObjectName  = $objectFolder.Name
+                ProjectName = $metadataFile.Directory.Name
+                ProjectPath = $metadataFile.Directory.FullName
+                MetaPath    = $metadataFile.FullName
+                Score       = $objectMatch.Score
+            }
+        }
+    }
+
+    return @($projects | Sort-Object `
+        -Property @{ Expression = "Score"; Descending = $true }, ObjectName, ProjectName, MetaPath)
+}
+
+function Resolve-AsiToPixProjectMetadataPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputValue,
+
+        [AllowEmptyString()]
+        [string]$ProcessingRoot = "",
+
+        [scriptblock]$SelectionReader = {
+            param($Prompt)
+            Read-Host $Prompt
+        }
+    )
+
+    $resolvedInput = $InputValue.Trim().Trim('"')
+    if ([string]::IsNullOrWhiteSpace($resolvedInput)) {
+        throw "The project metadata path or object name cannot be empty."
+    }
+
+    if (Test-Path -LiteralPath $resolvedInput -PathType Leaf) {
+        return (Resolve-Path -LiteralPath $resolvedInput -ErrorAction Stop).ProviderPath
+    }
+
+    if (Test-Path -LiteralPath $resolvedInput -PathType Container) {
+        $metadataPath = Join-Path -Path $resolvedInput -ChildPath "project_meta.json"
+        if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
+            throw "Project folder '$resolvedInput' does not contain project_meta.json."
+        }
+
+        return (Resolve-Path -LiteralPath $metadataPath -ErrorAction Stop).ProviderPath
+    }
+
+    $looksLikePath = [System.IO.Path]::IsPathRooted($resolvedInput) -or
+        $resolvedInput.Contains([System.IO.Path]::DirectorySeparatorChar) -or
+        $resolvedInput.Contains([System.IO.Path]::AltDirectorySeparatorChar) -or
+        [System.IO.Path]::GetExtension($resolvedInput) -ieq ".json"
+    if ($looksLikePath) {
+        throw "Project metadata path not found: '$resolvedInput'."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($ProcessingRoot)) {
+        throw "ProcessingRoot is required to resolve object name '$resolvedInput'."
+    }
+
+    $candidates = @(Find-AsiToPixProcessingProjectMetadata `
+        -ProcessingRoot $ProcessingRoot `
+        -ObjectName $resolvedInput)
+    if ($candidates.Count -eq 0) {
+        throw "No processing project matching object name '$resolvedInput' with project_meta.json was found under '$ProcessingRoot'."
+    }
+
+    if ($candidates.Count -eq 1) {
+        Write-Host "[INFO] Object '$resolvedInput' resolved to project: $($candidates[0].ProjectPath)" -ForegroundColor Cyan
+        return $candidates[0].MetaPath
+    }
+
+    Write-Host "`nMatching processing projects for '${resolvedInput}':" -ForegroundColor Cyan
+    for ($i = 0; $i -lt $candidates.Count; $i++) {
+        $candidate = $candidates[$i]
+        Write-Host (" [{0}] {1} | {2}" -f ($i + 1), $candidate.ObjectName, $candidate.ProjectName) -ForegroundColor White
+        Write-Host "     $($candidate.MetaPath)" -ForegroundColor DarkGray
+    }
+
+    do {
+        $answerValue = & $SelectionReader "Select processing project index, press Enter for 1, or type a project_meta.json path"
+        if ($null -eq $answerValue) {
+            throw "Project selection input ended before an answer was received."
+        }
+
+        $answer = ([string]$answerValue).Trim().Trim('"')
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            return $candidates[0].MetaPath
+        }
+
+        if ($answer -match '^\d+$') {
+            $index = [int]$answer - 1
+            if ($index -ge 0 -and $index -lt $candidates.Count) {
+                return $candidates[$index].MetaPath
+            }
+        } elseif (Test-Path -LiteralPath $answer -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $answer -ErrorAction Stop).ProviderPath
+        } elseif (Test-Path -LiteralPath $answer -PathType Container) {
+            $selectedMetadataPath = Join-Path -Path $answer -ChildPath "project_meta.json"
+            if (Test-Path -LiteralPath $selectedMetadataPath -PathType Leaf) {
+                return (Resolve-Path -LiteralPath $selectedMetadataPath -ErrorAction Stop).ProviderPath
+            }
+        }
+
+        Write-Host "[!] Invalid processing project selection." -ForegroundColor Red
+    } while ($true)
 }
 
 function Get-AsiToPixCalibrationFolder {
@@ -835,6 +984,43 @@ function Get-AsiToPixDestinationMasterState {
     }
 }
 
+function Set-AsiToPixMasterExportEntryDestinationState {
+    [CmdletBinding()]
+    [OutputType([void])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Entry,
+
+        [Parameter(Mandatory = $true)]
+        [object]$DestinationState
+    )
+
+    $Entry.ExistingMasterPath = $DestinationState.ExistingMasterPath
+    $Entry.ExistingMasterCount = $DestinationState.ExistingMasterCount
+    $Entry.Reason = $DestinationState.Reason
+    switch ($DestinationState.State) {
+        "None" {
+            $Entry.Status = "Planned"
+            $Entry.Reason = "The destination folder does not contain a master."
+        }
+        "Exact" {
+            $Entry.Status = "Exists"
+        }
+        "Legacy" {
+            $Entry.Status = "Exists"
+        }
+        "Other" {
+            $Entry.Status = "Exists"
+        }
+        "Conflict" {
+            $Entry.Status = "Conflict"
+        }
+        default {
+            throw "Unknown destination master state '$($DestinationState.State)' for '$($Entry.DestinationPath)'."
+        }
+    }
+}
+
 function Read-AsiToPixMasterExportConfirmation {
     [CmdletBinding()]
     [OutputType([bool])]
@@ -863,6 +1049,43 @@ function Read-AsiToPixMasterExportConfirmation {
         }
 
         Write-Host "Please answer Y/N or Russian yes/no initials." -ForegroundColor Yellow
+    }
+}
+
+function Read-AsiToPixMasterExportSelection {
+    [CmdletBinding()]
+    [OutputType([object])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$ChoiceCandidate,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$InputReader
+    )
+
+    if ($ChoiceCandidate.Count -lt 2) {
+        throw "A master selection must contain at least two candidate files."
+    }
+
+    while ($true) {
+        $answerValue = & $InputReader "Choose source [1-$($ChoiceCandidate.Count), S to skip]"
+        if ($null -eq $answerValue) {
+            throw "Selection input ended before an answer was received."
+        }
+
+        $answer = ([string]$answerValue).Trim()
+        if ($answer -ieq "s" -or $answer -ieq "skip") {
+            return $null
+        }
+
+        $choiceIndex = 0
+        if ([int]::TryParse($answer, [ref]$choiceIndex) -and
+            $choiceIndex -ge 1 -and $choiceIndex -le $ChoiceCandidate.Count) {
+            return $ChoiceCandidate[$choiceIndex - 1]
+        }
+
+        Write-Host "Enter a number from 1 to $($ChoiceCandidate.Count), or S to skip." -ForegroundColor Yellow
     }
 }
 
@@ -898,106 +1121,6 @@ function Copy-AsiToPixMasterFile {
     if ($destinationLength -ne $sourceLength) {
         Remove-Item -LiteralPath $normalizedDestinationPath -Force -ErrorAction Stop
         throw "Copied master size mismatch for '$normalizedDestinationPath'. The incomplete copy was removed."
-    }
-
-    return $true
-}
-
-function Rename-AsiToPixLegacyMaster {
-    [CmdletBinding(SupportsShouldProcess = $true)]
-    [OutputType([bool])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$ExistingPath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$DestinationPath
-    )
-
-    $normalizedExistingPath = (Resolve-Path -LiteralPath $ExistingPath -ErrorAction Stop).ProviderPath
-    $normalizedDestinationPath = [System.IO.Path]::GetFullPath($DestinationPath)
-    if (Test-Path -LiteralPath $normalizedDestinationPath) {
-        throw "Refusing to rename legacy master because the canonical path already exists: '$normalizedDestinationPath'."
-    }
-
-    if (-not $PSCmdlet.ShouldProcess(
-        $normalizedExistingPath,
-        "Rename legacy master to '$normalizedDestinationPath'"
-    )) {
-        return $false
-    }
-
-    Move-Item -LiteralPath $normalizedExistingPath -Destination $normalizedDestinationPath -ErrorAction Stop
-    return $true
-}
-
-function Set-AsiToPixMasterReplacement {
-    [CmdletBinding(SupportsShouldProcess = $true)]
-    [OutputType([bool])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$SourcePath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$ExistingPath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$DestinationPath
-    )
-
-    $normalizedSourcePath = (Resolve-Path -LiteralPath $SourcePath -ErrorAction Stop).ProviderPath
-    $normalizedExistingPath = (Resolve-Path -LiteralPath $ExistingPath -ErrorAction Stop).ProviderPath
-    $normalizedDestinationPath = [System.IO.Path]::GetFullPath($DestinationPath)
-    $sameDestination = $normalizedExistingPath.Equals(
-        $normalizedDestinationPath,
-        [System.StringComparison]::OrdinalIgnoreCase
-    )
-    if (-not $sameDestination -and (Test-Path -LiteralPath $normalizedDestinationPath)) {
-        throw "Refusing to replace the existing master because the canonical path already exists: '$normalizedDestinationPath'."
-    }
-
-    if (-not $PSCmdlet.ShouldProcess(
-        $normalizedExistingPath,
-        "Replace with '$normalizedSourcePath' and store it as '$normalizedDestinationPath'"
-    )) {
-        return $false
-    }
-
-    $backupPath = "$normalizedExistingPath.AsToPixBackup-$([guid]::NewGuid().ToString('N'))"
-    Move-Item -LiteralPath $normalizedExistingPath -Destination $backupPath -ErrorAction Stop
-    try {
-        [System.IO.File]::Copy($normalizedSourcePath, $normalizedDestinationPath, $false)
-        $sourceLength = (Get-Item -LiteralPath $normalizedSourcePath -ErrorAction Stop).Length
-        $destinationLength = (Get-Item -LiteralPath $normalizedDestinationPath -ErrorAction Stop).Length
-        if ($destinationLength -ne $sourceLength) {
-            throw "Replacement master size mismatch for '$normalizedDestinationPath'."
-        }
-
-        Remove-Item -LiteralPath $backupPath -Force -ErrorAction Stop
-    } catch {
-        $replacementError = $_
-        $recoveryIssues = [System.Collections.Generic.List[string]]::new()
-        if (Test-Path -LiteralPath $normalizedDestinationPath -PathType Leaf) {
-            try {
-                Remove-Item -LiteralPath $normalizedDestinationPath -Force -ErrorAction Stop
-            } catch {
-                $recoveryIssues.Add("Could not remove the incomplete replacement '$normalizedDestinationPath': $($_.Exception.Message)")
-            }
-        }
-        if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
-            try {
-                Move-Item -LiteralPath $backupPath -Destination $normalizedExistingPath -ErrorAction Stop
-            } catch {
-                $recoveryIssues.Add("Could not restore the original master. Its backup remains at '$backupPath': $($_.Exception.Message)")
-            }
-        }
-
-        $recoveryMessage = if ($recoveryIssues.Count -gt 0) {
-            " Recovery issues: $($recoveryIssues -join ' ')"
-        } else {
-            " The original master was restored."
-        }
-        throw "Could not replace master '$normalizedExistingPath' with '$normalizedSourcePath': $($replacementError.Exception.Message)$recoveryMessage"
     }
 
     return $true
@@ -1136,6 +1259,7 @@ function Get-AsiToPixMasterExportPlan {
             ExistingMasterPath   = $null
             ExistingMasterCount  = 0
             DuplicateOf          = $null
+            ChoiceCandidates     = @()
             Reason               = $null
         })
     }
@@ -1154,11 +1278,21 @@ function Get-AsiToPixMasterExportPlan {
         $group = @($candidateGroups[$destinationPath] | Sort-Object SourcePath)
         $distinctLengths = @($group.SourceLength | Sort-Object -Unique)
         if ($distinctLengths.Count -gt 1) {
-            foreach ($candidate in $group) {
-                $candidate.Status = "Conflict"
-                $candidate.Reason = "Logical duplicates have different file sizes and cannot be selected safely."
-                $entries.Add($candidate)
+            $selection = $group[0]
+            $destinationState = Get-AsiToPixDestinationMasterState `
+                -DestinationPath $destinationPath `
+                -ExpectedMasterType $selection.MasterType
+            if ($destinationState.State -ne "None") {
+                Set-AsiToPixMasterExportEntryDestinationState `
+                    -Entry $selection `
+                    -DestinationState $destinationState
+                $entries.Add($selection)
+                continue
             }
+            $selection.Status = "Conflict"
+            $selection.ChoiceCandidates = @($group)
+            $selection.Reason = "Logical duplicates have different file sizes. Select one source before executing the export plan."
+            $entries.Add($selection)
             continue
         }
 
@@ -1166,27 +1300,9 @@ function Get-AsiToPixMasterExportPlan {
         $destinationState = Get-AsiToPixDestinationMasterState `
             -DestinationPath $destinationPath `
             -ExpectedMasterType $primary.MasterType
-        $primary.ExistingMasterPath = $destinationState.ExistingMasterPath
-        $primary.ExistingMasterCount = $destinationState.ExistingMasterCount
-        $primary.Reason = $destinationState.Reason
-        switch ($destinationState.State) {
-            "None" {
-                $primary.Status = "Planned"
-                $primary.Reason = "The destination folder does not contain a master."
-            }
-            "Exact" {
-                $primary.Status = "Exists"
-            }
-            "Legacy" {
-                $primary.Status = "Legacy"
-            }
-            "Other" {
-                $primary.Status = "ExistingOther"
-            }
-            "Conflict" {
-                $primary.Status = "Conflict"
-            }
-        }
+        Set-AsiToPixMasterExportEntryDestinationState `
+            -Entry $primary `
+            -DestinationState $destinationState
         $entries.Add($primary)
 
         foreach ($duplicate in @($group | Select-Object -Skip 1)) {
@@ -1209,6 +1325,232 @@ function Get-AsiToPixMasterExportPlan {
     }
 }
 
+function ConvertTo-AsiToPixMasterExportFileSizeText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [long]$ByteCount
+    )
+
+    $units = @("B", "KiB", "MiB", "GiB", "TiB")
+    $size = [double]$ByteCount
+    $unitIndex = 0
+    while ($size -ge 1024 -and $unitIndex -lt ($units.Count - 1)) {
+        $size = $size / 1024
+        $unitIndex++
+    }
+
+    $invariantCulture = [System.Globalization.CultureInfo]::InvariantCulture
+    return "$($size.ToString('0.0', $invariantCulture)) $($units[$unitIndex])"
+}
+
+function Get-AsiToPixMasterExportDestinationDisplay {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Entry
+    )
+
+    $destinationPath = [string](Get-AsiToPixObjectPropertyValue -InputObject $Entry -Name "DestinationPath")
+    $masterType = [string](Get-AsiToPixObjectPropertyValue -InputObject $Entry -Name "MasterType")
+    if ([string]::IsNullOrWhiteSpace($destinationPath)) {
+        return [PSCustomObject]@{
+            Camera          = "Unmapped"
+            Category        = "Unmapped"
+            DestinationRoot = $null
+            Setup           = $null
+            LeafDestination = $null
+        }
+    }
+
+    $normalizedDestinationPath = [System.IO.Path]::GetFullPath($destinationPath)
+    $destinationFolder = Split-Path -Path $normalizedDestinationPath -Parent
+    $categoryRoot = $null
+    $masterContainer = $null
+    $currentFolder = $destinationFolder
+    while (-not [string]::IsNullOrWhiteSpace($currentFolder)) {
+        $possibleMasterContainer = Split-Path -Path $currentFolder -Parent
+        if ([string]::IsNullOrWhiteSpace($possibleMasterContainer)) {
+            break
+        }
+        if ((Split-Path -Path $possibleMasterContainer -Leaf) -ieq "Master") {
+            $categoryRoot = $currentFolder
+            $masterContainer = $possibleMasterContainer
+            break
+        }
+
+        $parentFolder = Split-Path -Path $currentFolder -Parent
+        if ([string]::IsNullOrWhiteSpace($parentFolder) -or
+            $parentFolder.Equals($currentFolder, [System.StringComparison]::OrdinalIgnoreCase)) {
+            break
+        }
+        $currentFolder = $parentFolder
+    }
+
+    if ($null -eq $categoryRoot) {
+        $fallbackCategory = switch ($masterType) {
+            "Bias" { "Biases" }
+            "Dark" { "Darks" }
+            "Flat" { "Flats" }
+            default { "Masters" }
+        }
+        return [PSCustomObject]@{
+            Camera          = "Unknown camera"
+            Category        = $fallbackCategory
+            DestinationRoot = $destinationFolder
+            Setup           = $null
+            LeafDestination = Split-Path -Path $normalizedDestinationPath -Leaf
+        }
+    }
+
+    $category = switch ((Split-Path -Path $categoryRoot -Leaf).ToLowerInvariant()) {
+        "bias" { "Biases" }
+        "biases" { "Biases" }
+        "dark" { "Darks" }
+        "darks" { "Darks" }
+        "flat" { "Flats" }
+        "flats" { "Flats" }
+        "flat-dark" { "FlatDarks" }
+        "flat-darks" { "FlatDarks" }
+        "flatdark" { "FlatDarks" }
+        "flatdarks" { "FlatDarks" }
+        default { "Masters" }
+    }
+    $cameraFolder = Split-Path -Path $masterContainer -Parent
+    $camera = Split-Path -Path $cameraFolder -Leaf
+    $relativeDestination = Get-AsiToPixRelativeChildPath `
+        -RootPath $categoryRoot `
+        -ChildPath $normalizedDestinationPath
+    if ([string]::IsNullOrWhiteSpace($relativeDestination)) {
+        $relativeDestination = Split-Path -Path $normalizedDestinationPath -Leaf
+    }
+
+    $setup = $null
+    $leafDestination = $relativeDestination
+    if ($category -eq "Flats") {
+        $relativeParts = @($relativeDestination -split '[\\/]')
+        if ($relativeParts.Count -gt 1 -and -not [string]::IsNullOrWhiteSpace($relativeParts[0])) {
+            $setup = $relativeParts[0]
+            $leafDestination = ($relativeParts | Select-Object -Skip 1) -join "\"
+        }
+    }
+
+    return [PSCustomObject]@{
+        Camera          = $camera
+        Category        = $category
+        DestinationRoot = $categoryRoot
+        Setup           = $setup
+        LeafDestination = $leafDestination
+    }
+}
+
+function Get-AsiToPixMasterExportTreeLeafText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Entry,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Display
+    )
+
+    $status = [string](Get-AsiToPixObjectPropertyValue -InputObject $Entry -Name "Status")
+    $sourcePath = [string](Get-AsiToPixObjectPropertyValue -InputObject $Entry -Name "SourcePath")
+    $sourceName = if ([string]::IsNullOrWhiteSpace($sourcePath)) {
+        "<unknown source>"
+    } else {
+        Split-Path -Path $sourcePath -Leaf
+    }
+    $destination = [string](Get-AsiToPixObjectPropertyValue -InputObject $Display -Name "LeafDestination")
+    if ([string]::IsNullOrWhiteSpace($destination)) {
+        $destination = "<no destination>"
+    }
+
+    switch ($status) {
+        "Planned" { return "[Copy] $sourceName --> $destination" }
+        "Exists" {
+            $existingPath = [string](Get-AsiToPixObjectPropertyValue -InputObject $Entry -Name "ExistingMasterPath")
+            $existingName = if ([string]::IsNullOrWhiteSpace($existingPath)) {
+                Split-Path -Path $destination -Leaf
+            } else {
+                Split-Path -Path $existingPath -Leaf
+            }
+            return "[Exists] $existingName --> $destination"
+        }
+        "Legacy" { return "[Exists] $sourceName --> $destination" }
+        "ExistingOther" { return "[Exists] $sourceName --> $destination" }
+        "Duplicate" { return "[Duplicate omitted] $sourceName --> $destination" }
+        "Conflict" {
+            $choiceCandidates = @(Get-AsiToPixObjectPropertyValue -InputObject $Entry -Name "ChoiceCandidates")
+            if ($choiceCandidates.Count -gt 1) {
+                return "[Conflict] choose one of $($choiceCandidates.Count) --> $destination"
+            }
+            return "[Conflict] $sourceName --> $destination"
+        }
+        "Skipped" { return "[Skipped] $sourceName" }
+        default { return "[$status] $sourceName --> $destination" }
+    }
+}
+
+function Get-AsiToPixMasterExportTreeLeafColor {
+    [CmdletBinding()]
+    [OutputType([System.ConsoleColor])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Entry
+    )
+
+    switch ([string](Get-AsiToPixObjectPropertyValue -InputObject $Entry -Name "Status")) {
+        "Planned" { return [System.ConsoleColor]::Green }
+        "Exists" { return [System.ConsoleColor]::Yellow }
+        "Legacy" { return [System.ConsoleColor]::Yellow }
+        "ExistingOther" { return [System.ConsoleColor]::Yellow }
+        "Duplicate" { return [System.ConsoleColor]::DarkYellow }
+        "Conflict" { return [System.ConsoleColor]::Red }
+        "Skipped" { return [System.ConsoleColor]::Yellow }
+        default { return [System.ConsoleColor]::Gray }
+    }
+}
+
+function Write-AsiToPixMasterExportTreeLeaf {
+    [CmdletBinding()]
+    [OutputType([void])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Indent,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Entry,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Display
+    )
+
+    $text = Get-AsiToPixMasterExportTreeLeafText -Entry $Entry -Display $Display
+    $color = Get-AsiToPixMasterExportTreeLeafColor -Entry $Entry
+    Write-Host "$Indent $text" -ForegroundColor $color
+
+    $choiceCandidates = @(Get-AsiToPixObjectPropertyValue -InputObject $Entry -Name "ChoiceCandidates")
+    if ([string](Get-AsiToPixObjectPropertyValue -InputObject $Entry -Name "Status") -ne "Conflict" -or
+        $choiceCandidates.Count -lt 2) {
+        return
+    }
+
+    $choiceIndent = $Indent.Substring(0, $Indent.Length - 2) + "|  |-"
+    $choiceIndex = 1
+    foreach ($candidate in $choiceCandidates) {
+        $candidatePath = [string](Get-AsiToPixObjectPropertyValue -InputObject $candidate -Name "SourcePath")
+        $candidateName = Split-Path -Path $candidatePath -Leaf
+        $candidateLength = [long](Get-AsiToPixObjectPropertyValue -InputObject $candidate -Name "SourceLength")
+        $sizeText = ConvertTo-AsiToPixMasterExportFileSizeText -ByteCount $candidateLength
+        Write-Host "$choiceIndent [$choiceIndex] $candidateName ($sizeText)" -ForegroundColor DarkYellow
+        $choiceIndex++
+    }
+}
+
 function Write-AsiToPixMasterExportPlan {
     [CmdletBinding()]
     [OutputType([void])]
@@ -1217,80 +1559,110 @@ function Write-AsiToPixMasterExportPlan {
         [object]$Plan
     )
 
-    Write-Host "`n--- Master export plan ---" -ForegroundColor Cyan
-    Write-Host "WBPP masters : $($Plan.MasterPath)" -ForegroundColor DarkGray
-    Write-Host "Project Source: $($Plan.ProjectSourcePath)" -ForegroundColor DarkGray
+    Write-Host "`n[Plan] calibration masters from: $($Plan.MasterPath)" -ForegroundColor Cyan
+    Write-Host "       project sources: $($Plan.ProjectSourcePath)" -ForegroundColor DarkGray
 
     foreach ($diagnostic in @($Plan.Diagnostics)) {
-        Write-Host "[SOURCE WARNING] $diagnostic" -ForegroundColor Yellow
+        Write-Host "[Source warning] $diagnostic" -ForegroundColor Yellow
     }
 
     if ($Plan.EligibleMasterCount -eq 0) {
-        Write-Host "[INFO] No WBPP bias, dark, or flat masters were found in '$($Plan.MasterPath)'." -ForegroundColor Yellow
+        Write-Host "[Info] No WBPP bias, dark, or flat masters were found in '$($Plan.MasterPath)'." -ForegroundColor Yellow
     }
 
-    foreach ($entry in @($Plan.Entries)) {
-        switch ($entry.Status) {
-            "Planned" {
-                Write-Host "`n[PLAN COPY] $($entry.MasterType)" -ForegroundColor Green
-                Write-Host "  FROM: $($entry.SourcePath)" -ForegroundColor Gray
-                Write-Host "  TO  : $($entry.DestinationPath)" -ForegroundColor White
-            }
-            "Exists" {
-                Write-Host "`n[EXISTS] $($entry.DestinationPath)" -ForegroundColor Yellow
-                Write-Host "  FROM: $($entry.SourcePath)" -ForegroundColor DarkGray
-                Write-Host "  Replacement confirmation will be requested." -ForegroundColor DarkGray
-            }
-            "Legacy" {
-                Write-Host "`n[LEGACY NAME] $($entry.ExistingMasterPath)" -ForegroundColor Yellow
-                Write-Host "  CANONICAL: $($entry.DestinationPath)" -ForegroundColor White
-                Write-Host "  NEW FROM : $($entry.SourcePath)" -ForegroundColor DarkGray
-                Write-Host "  Rename or replacement confirmation will be requested." -ForegroundColor DarkGray
-            }
-            "ExistingOther" {
-                Write-Host "`n[EXISTING MASTER] $($entry.ExistingMasterPath)" -ForegroundColor Yellow
-                Write-Host "  NEW FROM: $($entry.SourcePath)" -ForegroundColor DarkGray
-                Write-Host "  NEW TO  : $($entry.DestinationPath)" -ForegroundColor White
-                Write-Host "  The existing master has a different canonical identity; replacement confirmation will be requested." -ForegroundColor Yellow
-            }
-            "Duplicate" {
-                Write-Host "`n[DUPLICATE OMITTED] $($entry.SourcePath)" -ForegroundColor DarkYellow
-                Write-Host "  TO  : $($entry.DestinationPath)" -ForegroundColor DarkGray
-                Write-Host "  KEPT: $($entry.DuplicateOf)" -ForegroundColor DarkGray
-            }
-            "Conflict" {
-                Write-Host "`n[CONFLICT] $($entry.SourcePath)" -ForegroundColor Red
-                Write-Host "  $($entry.Reason)" -ForegroundColor Red
-                if (-not [string]::IsNullOrWhiteSpace([string]$entry.DestinationPath)) {
-                    Write-Host "  TO: $($entry.DestinationPath)" -ForegroundColor DarkGray
+    $displayEntries = foreach ($entry in @($Plan.Entries)) {
+        [PSCustomObject]@{
+            Entry   = $entry
+            Display = Get-AsiToPixMasterExportDestinationDisplay -Entry $entry
+        }
+    }
+    $mappedEntries = @($displayEntries | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_.Display.DestinationRoot)
+    })
+
+    $categoryOrder = @{ "Flats" = 0; "Darks" = 1; "FlatDarks" = 2; "Biases" = 3; "Masters" = 4 }
+    foreach ($cameraGroup in @($mappedEntries | Group-Object -Property { $_.Display.Camera } | Sort-Object Name)) {
+        Write-Host "`n[Camera] $($cameraGroup.Name)" -ForegroundColor Cyan
+        $branches = @($cameraGroup.Group | Group-Object -Property {
+            "$($_.Display.Category)`0$($_.Display.DestinationRoot)"
+        })
+        $sortedBranches = @($branches | Sort-Object `
+            @{ Expression = {
+                $category = $_.Group[0].Display.Category
+                if ($categoryOrder.ContainsKey($category)) { $categoryOrder[$category] } else { 99 }
+            } }, `
+            Name)
+        foreach ($branch in $sortedBranches) {
+            $branchEntries = @($branch.Group | Sort-Object `
+                @{ Expression = { $_.Display.Setup } }, `
+                @{ Expression = { $_.Display.LeafDestination } }, `
+                @{ Expression = { $_.Entry.SourcePath } })
+            $firstDisplay = $branchEntries[0].Display
+            Write-Host "  |- [$($firstDisplay.Category)] copy to: $($firstDisplay.DestinationRoot)" -ForegroundColor White
+
+            if ($firstDisplay.Category -eq "Flats") {
+                foreach ($setupGroup in @($branchEntries | Group-Object -Property {
+                    if ([string]::IsNullOrWhiteSpace([string]$_.Display.Setup)) {
+                        "<unknown setup>"
+                    } else {
+                        $_.Display.Setup
+                    }
+                } | Sort-Object Name)) {
+                    Write-Host "  |  |- [$($setupGroup.Name)]" -ForegroundColor White
+                    foreach ($displayEntry in @($setupGroup.Group | Sort-Object `
+                        @{ Expression = { $_.Display.LeafDestination } }, `
+                        @{ Expression = { $_.Entry.SourcePath } })) {
+                        Write-AsiToPixMasterExportTreeLeaf `
+                            -Indent "  |  |  |-" `
+                            -Entry $displayEntry.Entry `
+                            -Display $displayEntry.Display
+                    }
+                }
+            } else {
+                foreach ($displayEntry in $branchEntries) {
+                    Write-AsiToPixMasterExportTreeLeaf `
+                        -Indent "  |  |-" `
+                        -Entry $displayEntry.Entry `
+                        -Display $displayEntry.Display
                 }
             }
-            "Skipped" {
-                Write-Host "`n[SKIPPED] $($entry.SourcePath)" -ForegroundColor Yellow
-                Write-Host "  $($entry.Reason)" -ForegroundColor Yellow
+        }
+    }
+
+    $unmappedEntries = @($displayEntries | Where-Object {
+        [string]::IsNullOrWhiteSpace([string]$_.Display.DestinationRoot)
+    })
+    if ($unmappedEntries.Count -gt 0) {
+        Write-Host "`n[Unmapped]" -ForegroundColor Yellow
+        foreach ($displayEntry in $unmappedEntries) {
+            $entry = $displayEntry.Entry
+            $sourcePath = [string](Get-AsiToPixObjectPropertyValue -InputObject $entry -Name "SourcePath")
+            $sourceName = if ([string]::IsNullOrWhiteSpace($sourcePath)) {
+                "<unknown source>"
+            } else {
+                Split-Path -Path $sourcePath -Leaf
             }
+            $reason = [string](Get-AsiToPixObjectPropertyValue -InputObject $entry -Name "Reason")
+            $color = Get-AsiToPixMasterExportTreeLeafColor -Entry $entry
+            Write-Host "  |- ${sourceName}: $reason" -ForegroundColor $color
         }
     }
 
     $entries = @($Plan.Entries)
     $plannedCount = @($entries | Where-Object { $_.Status -eq "Planned" }).Count
     $existingCount = @($entries | Where-Object { $_.Status -eq "Exists" }).Count
-    $legacyCount = @($entries | Where-Object { $_.Status -eq "Legacy" }).Count
-    $otherExistingCount = @($entries | Where-Object { $_.Status -eq "ExistingOther" }).Count
     $duplicateCount = @($entries | Where-Object { $_.Status -eq "Duplicate" }).Count
     $skippedCount = @($entries | Where-Object { $_.Status -eq "Skipped" }).Count
     $conflictCount = @($entries | Where-Object { $_.Status -eq "Conflict" }).Count
 
-    Write-Host "`n--- Summary ---" -ForegroundColor Cyan
-    Write-Host "WBPP .xisf files     : $($Plan.XisfFileCount)"
-    Write-Host "Calibration masters  : $($Plan.EligibleMasterCount)"
-    Write-Host "Planned copies       : $plannedCount" -ForegroundColor Green
-    Write-Host "Already exist        : $existingCount" -ForegroundColor Yellow
-    Write-Host "Legacy names         : $legacyCount" -ForegroundColor Yellow
-    Write-Host "Other existing       : $otherExistingCount" -ForegroundColor Yellow
-    Write-Host "Duplicates omitted   : $duplicateCount" -ForegroundColor DarkYellow
-    Write-Host "Skipped / conflicts  : $skippedCount / $conflictCount"
-    Write-Host "Ignored non-masters  : $($Plan.IgnoredFileCount)" -ForegroundColor DarkGray
+    Write-Host "`n[Summary]" -ForegroundColor Cyan
+    Write-Host "  WBPP .xisf files    : $($Plan.XisfFileCount)"
+    Write-Host "  Calibration masters : $($Plan.EligibleMasterCount)"
+    Write-Host "  Planned copies      : $plannedCount" -ForegroundColor Green
+    Write-Host "  Already exist       : $existingCount" -ForegroundColor Yellow
+    Write-Host "  Duplicates omitted  : $duplicateCount" -ForegroundColor DarkYellow
+    Write-Host "  Skipped / conflicts : $skippedCount / $conflictCount"
+    Write-Host "  Ignored non-masters : $($Plan.IgnoredFileCount)" -ForegroundColor DarkGray
     Write-Host "`nNo changes have been made yet." -ForegroundColor Cyan
 }
 
@@ -1304,80 +1676,148 @@ function Invoke-AsiToPixMasterExportPlan {
         [scriptblock]$ConfirmationReader = {
             param($Prompt)
             Read-Host $Prompt
+        },
+
+        [scriptblock]$SelectionReader = {
+            param($Prompt)
+            Read-Host $Prompt
         }
     )
 
     $copiedCount = 0
-    $renamedCount = 0
-    $replacedCount = 0
     $declinedCount = 0
     $blockedCount = 0
+    $existingCount = 0
     $whatIfCount = 0
-    $actionableEntries = @($Plan.Entries | Where-Object {
-        $_.Status -in @("Planned", "Exists", "Legacy", "ExistingOther")
-    })
+    $selectedCount = 0
+    $selectionSkippedCount = 0
+    $conflictPendingCount = 0
+    $selectionChanged = $false
+    $resolvedEntries = [System.Collections.Generic.List[object]]::new()
 
-    Write-Host "`n--- Apply master export plan ---" -ForegroundColor Cyan
-    foreach ($entry in $actionableEntries) {
-        if (-not (Test-Path -LiteralPath $entry.SourcePath -PathType Leaf)) {
-            throw "WBPP master disappeared before export: '$($entry.SourcePath)'."
-        }
-        $currentSourceLength = (Get-Item -LiteralPath $entry.SourcePath -ErrorAction Stop).Length
-        if ($currentSourceLength -ne $entry.SourceLength) {
-            throw "WBPP master changed after the plan was built: '$($entry.SourcePath)'. Build the export plan again."
-        }
-
-        $destinationState = Get-AsiToPixDestinationMasterState `
-            -DestinationPath $entry.DestinationPath `
-            -ExpectedMasterType $entry.MasterType
-        if ($destinationState.State -eq "Conflict") {
-            Write-Host "`n[BLOCKED] $($entry.DestinationPath)" -ForegroundColor Red
-            Write-Host "  $($destinationState.Reason)" -ForegroundColor Red
-            $blockedCount++
+    Write-Host "`n--- Resolve master conflicts ---" -ForegroundColor Cyan
+    foreach ($entry in @($Plan.Entries)) {
+        $choiceCandidates = @(Get-AsiToPixObjectPropertyValue -InputObject $entry -Name "ChoiceCandidates")
+        $requiresSelection = $entry.Status -eq "Conflict" -and $choiceCandidates.Count -gt 1
+        if (-not $requiresSelection) {
+            $resolvedEntries.Add($entry)
             continue
         }
 
-        Write-Host "`n$($entry.MasterType) master" -ForegroundColor Cyan
-        Write-Host "  FROM: $($entry.SourcePath)" -ForegroundColor Gray
-        Write-Host "  TO  : $($entry.DestinationPath)" -ForegroundColor White
+        $destinationPath = [string](Get-AsiToPixObjectPropertyValue -InputObject $entry -Name "DestinationPath")
+        $destinationState = Get-AsiToPixDestinationMasterState `
+            -DestinationPath $destinationPath `
+            -ExpectedMasterType $entry.MasterType
+        if ($destinationState.State -ne "None") {
+            $entry.ChoiceCandidates = @()
+            Set-AsiToPixMasterExportEntryDestinationState `
+                -Entry $entry `
+                -DestinationState $destinationState
+            $resolvedEntries.Add($entry)
+            $selectionChanged = $true
+            continue
+        }
 
         if ($WhatIfPreference) {
-            switch ($destinationState.State) {
-                "None" {
-                    Copy-AsiToPixMasterFile `
-                        -SourcePath $entry.SourcePath `
-                        -DestinationPath $entry.DestinationPath `
-                        -WhatIf `
-                        -Confirm:$false | Out-Null
-                }
-                "Legacy" {
-                    Rename-AsiToPixLegacyMaster `
-                        -ExistingPath $destinationState.ExistingMasterPath `
-                        -DestinationPath $entry.DestinationPath `
-                        -WhatIf `
-                        -Confirm:$false | Out-Null
-                }
-                default {
-                    Set-AsiToPixMasterReplacement `
-                        -SourcePath $entry.SourcePath `
-                        -ExistingPath $destinationState.ExistingMasterPath `
-                        -DestinationPath $entry.DestinationPath `
-                        -WhatIf `
-                        -Confirm:$false | Out-Null
-                }
-            }
-            $whatIfCount++
+            Write-Host "`n[WHATIF Conflict] $destinationPath" -ForegroundColor DarkYellow
+            Write-Host "  A source selection is required; WhatIf does not prompt or choose a candidate." -ForegroundColor DarkGray
+            $resolvedEntries.Add($entry)
+            $conflictPendingCount++
             continue
         }
 
-        switch ($destinationState.State) {
-            "None" {
-                $copyConfirmed = Read-AsiToPixMasterExportConfirmation `
-                    -Prompt "Copy this master?" `
-                    -InputReader $ConfirmationReader
-                if (-not $copyConfirmed) {
-                    Write-Host "  Skipped by user." -ForegroundColor DarkYellow
-                    $declinedCount++
+        Write-Host "`n[Conflict] select one master for: $destinationPath" -ForegroundColor Red
+        $choiceIndex = 1
+        foreach ($choiceCandidate in $choiceCandidates) {
+            $choicePath = [string](Get-AsiToPixObjectPropertyValue -InputObject $choiceCandidate -Name "SourcePath")
+            $choiceName = Split-Path -Path $choicePath -Leaf
+            $choiceLength = [long](Get-AsiToPixObjectPropertyValue -InputObject $choiceCandidate -Name "SourceLength")
+            $choiceSize = ConvertTo-AsiToPixMasterExportFileSizeText -ByteCount $choiceLength
+            Write-Host "  [$choiceIndex] $choiceName ($choiceSize)" -ForegroundColor Gray
+            $choiceIndex++
+        }
+
+        $selectedCandidate = Read-AsiToPixMasterExportSelection `
+            -ChoiceCandidate $choiceCandidates `
+            -InputReader $SelectionReader
+        if ($null -eq $selectedCandidate) {
+            $entry.Status = "Skipped"
+            $entry.ChoiceCandidates = @()
+            $entry.Reason = "The user skipped source selection for this logical duplicate group."
+            $resolvedEntries.Add($entry)
+            $selectionSkippedCount++
+            $selectionChanged = $true
+            continue
+        }
+
+        $selectedDestinationPath = [string](Get-AsiToPixObjectPropertyValue `
+            -InputObject $selectedCandidate `
+            -Name "DestinationPath")
+        if (-not $selectedDestinationPath.Equals(
+            $destinationPath,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "Selected master destination differs from its logical duplicate group: '$selectedDestinationPath' vs '$destinationPath'."
+        }
+
+        $selectedCandidate.ChoiceCandidates = @()
+        $selectedDestinationState = Get-AsiToPixDestinationMasterState `
+            -DestinationPath $selectedCandidate.DestinationPath `
+            -ExpectedMasterType $selectedCandidate.MasterType
+        Set-AsiToPixMasterExportEntryDestinationState `
+            -Entry $selectedCandidate `
+            -DestinationState $selectedDestinationState
+        $resolvedEntries.Add($selectedCandidate)
+        $selectedCount++
+        $selectionChanged = $true
+    }
+
+    if ($selectionChanged) {
+        $Plan.Entries = @($resolvedEntries | Sort-Object MasterType, DestinationPath, SourcePath)
+        Write-Host "`n--- Updated master export plan ---" -ForegroundColor Cyan
+        Write-AsiToPixMasterExportPlan -Plan $Plan
+    }
+
+    $actionableEntries = @($Plan.Entries | Where-Object { $_.Status -eq "Planned" })
+    if ($actionableEntries.Count -eq 0) {
+        Write-Host "`n[Info] No planned master copies to execute." -ForegroundColor Yellow
+    } elseif ($WhatIfPreference) {
+        foreach ($entry in $actionableEntries) {
+            Copy-AsiToPixMasterFile `
+                -SourcePath $entry.SourcePath `
+                -DestinationPath $entry.DestinationPath `
+                -WhatIf `
+                -Confirm:$false | Out-Null
+            $whatIfCount++
+        }
+    } else {
+        $executeConfirmed = Read-AsiToPixMasterExportConfirmation `
+            -Prompt "Execute this plan ($($actionableEntries.Count) master copy/copies)?" `
+            -InputReader $ConfirmationReader
+        if (-not $executeConfirmed) {
+            $declinedCount = $actionableEntries.Count
+            Write-Host "[Info] Plan execution declined; no files were copied." -ForegroundColor DarkYellow
+        } else {
+            foreach ($entry in $actionableEntries) {
+                if (-not (Test-Path -LiteralPath $entry.SourcePath -PathType Leaf)) {
+                    throw "WBPP master disappeared before export: '$($entry.SourcePath)'."
+                }
+                $currentSourceLength = (Get-Item -LiteralPath $entry.SourcePath -ErrorAction Stop).Length
+                if ($currentSourceLength -ne $entry.SourceLength) {
+                    throw "WBPP master changed after the plan was built: '$($entry.SourcePath)'. Build the export plan again."
+                }
+
+                $destinationState = Get-AsiToPixDestinationMasterState `
+                    -DestinationPath $entry.DestinationPath `
+                    -ExpectedMasterType $entry.MasterType
+                if ($destinationState.State -ne "None") {
+                    if ($destinationState.State -eq "Conflict") {
+                        $blockedCount++
+                        Write-Host "[Conflict] $($entry.DestinationPath) was not changed: $($destinationState.Reason)" -ForegroundColor Red
+                    } else {
+                        $existingCount++
+                        Write-Host "[Exists] $($entry.DestinationPath) was not overwritten." -ForegroundColor Yellow
+                    }
                     continue
                 }
 
@@ -1386,68 +1826,8 @@ function Invoke-AsiToPixMasterExportPlan {
                     -DestinationPath $entry.DestinationPath `
                     -Confirm:$false
                 if ($copied) {
-                    Write-Host "  Copied." -ForegroundColor Green
+                    Write-Host "[Copied] $($entry.DestinationPath)" -ForegroundColor Green
                     $copiedCount++
-                }
-            }
-            "Legacy" {
-                Write-Host "  EXISTING LEGACY: $($destinationState.ExistingMasterPath)" -ForegroundColor Yellow
-                $renameConfirmed = Read-AsiToPixMasterExportConfirmation `
-                    -Prompt "Rename the existing legacy master without replacing its contents?" `
-                    -InputReader $ConfirmationReader
-                if ($renameConfirmed) {
-                    $renamed = Rename-AsiToPixLegacyMaster `
-                        -ExistingPath $destinationState.ExistingMasterPath `
-                        -DestinationPath $entry.DestinationPath `
-                        -Confirm:$false
-                    if ($renamed) {
-                        Write-Host "  Legacy master renamed." -ForegroundColor Green
-                        $renamedCount++
-                    }
-                    continue
-                }
-
-                $replaceConfirmed = Read-AsiToPixMasterExportConfirmation `
-                    -Prompt "Replace the existing legacy master with the new WBPP master?" `
-                    -InputReader $ConfirmationReader
-                if (-not $replaceConfirmed) {
-                    Write-Host "  Existing master kept." -ForegroundColor DarkYellow
-                    $declinedCount++
-                    continue
-                }
-
-                $replaced = Set-AsiToPixMasterReplacement `
-                    -SourcePath $entry.SourcePath `
-                    -ExistingPath $destinationState.ExistingMasterPath `
-                    -DestinationPath $entry.DestinationPath `
-                    -Confirm:$false
-                if ($replaced) {
-                    Write-Host "  Legacy master replaced." -ForegroundColor Green
-                    $replacedCount++
-                }
-            }
-            default {
-                Write-Host "  EXISTING: $($destinationState.ExistingMasterPath)" -ForegroundColor Yellow
-                if ($destinationState.State -eq "Other") {
-                    Write-Host "  Warning: the existing master has a different canonical name." -ForegroundColor Yellow
-                }
-                $replaceConfirmed = Read-AsiToPixMasterExportConfirmation `
-                    -Prompt "Replace the existing master with the new WBPP master?" `
-                    -InputReader $ConfirmationReader
-                if (-not $replaceConfirmed) {
-                    Write-Host "  Existing master kept." -ForegroundColor DarkYellow
-                    $declinedCount++
-                    continue
-                }
-
-                $replaced = Set-AsiToPixMasterReplacement `
-                    -SourcePath $entry.SourcePath `
-                    -ExistingPath $destinationState.ExistingMasterPath `
-                    -DestinationPath $entry.DestinationPath `
-                    -Confirm:$false
-                if ($replaced) {
-                    Write-Host "  Existing master replaced." -ForegroundColor Green
-                    $replacedCount++
                 }
             }
         }
@@ -1455,27 +1835,33 @@ function Invoke-AsiToPixMasterExportPlan {
 
     Write-Host "`n--- Apply summary ---" -ForegroundColor Cyan
     Write-Host "Copied             : $copiedCount" -ForegroundColor Green
-    Write-Host "Legacy names fixed : $renamedCount" -ForegroundColor Green
-    Write-Host "Replaced           : $replacedCount" -ForegroundColor Green
+    Write-Host "Already exists     : $existingCount" -ForegroundColor Yellow
     Write-Host "Declined           : $declinedCount" -ForegroundColor DarkYellow
     Write-Host "Blocked            : $blockedCount" -ForegroundColor Red
     Write-Host "WhatIf operations  : $whatIfCount" -ForegroundColor DarkGray
+    Write-Host "Selections made    : $selectedCount" -ForegroundColor Green
+    Write-Host "Selections skipped : $selectionSkippedCount" -ForegroundColor DarkYellow
+    Write-Host "Conflicts pending  : $conflictPendingCount" -ForegroundColor DarkYellow
 
     return [PSCustomObject]@{
-        CopiedCount   = $copiedCount
-        RenamedCount  = $renamedCount
-        ReplacedCount = $replacedCount
-        DeclinedCount = $declinedCount
-        BlockedCount  = $blockedCount
-        WhatIfCount   = $whatIfCount
+        CopiedCount           = $copiedCount
+        ExistingCount         = $existingCount
+        DeclinedCount         = $declinedCount
+        BlockedCount          = $blockedCount
+        WhatIfCount           = $whatIfCount
+        SelectedCount         = $selectedCount
+        SelectionSkippedCount = $selectionSkippedCount
+        ConflictPendingCount  = $conflictPendingCount
     }
 }
 
 Export-ModuleMember -Function `
+    Find-AsiToPixProcessingProjectMetadata, `
     Get-AsiToPixCleanMasterFileName, `
     Get-AsiToPixMasterExportPlan, `
     Get-AsiToPixWbppMasterInfo, `
     Invoke-AsiToPixMasterExportPlan, `
     Read-AsiToPixProjectMetadata, `
+    Resolve-AsiToPixProjectMetadataPath, `
     Test-AsiToPixProjectMetadataNeedsAstroPhotoRoot, `
     Write-AsiToPixMasterExportPlan

@@ -292,6 +292,14 @@ The script prints the recommended pre/post keyword placement and a camera/filter
 
 ### 6. Export WBPP masters
 
+The first prompt and `-MetaPath` accept either a `project_meta.json` path, a processing project folder, or an object name. An object name is fuzzy-matched below `AstroPhoto\Processing`; if several projects match, select one by its displayed index.
+
+For example, preview the only processing project matching `Helix`:
+
+```powershell
+.\ExportMasters.ps1 -MetaPath 'Helix' -WhatIf
+```
+
 Preview the export:
 
 ```powershell

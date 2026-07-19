@@ -35,6 +35,45 @@ Describe "CreateProject WBPP calibration tags" {
         $scriptText | Should Not Match '\$pathPart -like "\$cleanExp\*"'
     }
 
+    It "normalizes fractional temperatures independently of the current locale" {
+        $tokens = $null
+        $parseErrors = $null
+        $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            $scriptPath,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        $functionAst = $scriptAst.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'ConvertTo-CreateProjectTemperatureFolderName'
+        }, $true)
+        . ([scriptblock]::Create($functionAst.Extent.Text))
+
+        ConvertTo-CreateProjectTemperatureFolderName -Temperature '-9.8' | Should Be '-10C'
+        ConvertTo-CreateProjectTemperatureFolderName -Temperature '-9,8' | Should Be '-10C'
+        ConvertTo-CreateProjectTemperatureFolderName -Temperature ([double]-9.8) | Should Be '-10C'
+    }
+
+    It "converts millisecond flat exposures to seconds" {
+        $tokens = $null
+        $parseErrors = $null
+        $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            $scriptPath,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        $functionAst = $scriptAst.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'ConvertTo-CreateProjectExposureNumber'
+        }, $true)
+        . ([scriptblock]::Create($functionAst.Extent.Text))
+
+        ConvertTo-CreateProjectExposureNumber -ExposureText '490.0ms' | Should Be '0.49'
+        ConvertTo-CreateProjectExposureNumber -ExposureText '180s' | Should Be '180'
+    }
+
     It "resolves object-name input from the ASIAir archive" {
         $scriptText | Should Match 'function Resolve-CreateProjectInputPath'
         $scriptText | Should Match 'function Find-CreateProjectAsiairSourceCandidate'
@@ -57,6 +96,19 @@ Describe "CreateProject WBPP calibration tags" {
         $scriptText | Should Not Match '\$flatSelectionCache'
         $scriptText | Should Not Match 'or S to skip'
         $scriptText | Should Not Match 'Flats skipped for'
+    }
+
+    It "maps unfiltered OSC lights to RGB without merging them into L" {
+        $scriptText | Should Match "'\^\(None\|RGB\)\$'"
+        $scriptText | Should Match 'Filter="RGB";\s+Target="RGB"'
+        $scriptText | Should Match '\$rawFilt -eq "IRC" -or \$rawFilt -eq "Trib"'
+        $scriptText | Should Not Match '\$rawFilt -eq "None" -or \$rawFilt -eq "IRC"'
+    }
+
+    It "shows the supported image count for each light session in the project tree" {
+        $scriptText | Should Match 'FrameCount\s+= \$imageFiles\.Count'
+        $scriptText | Should Match '\$frameCountPart = if \(\$_\.Type -eq "Lights"\)'
+        $scriptText | Should Match 'Write-Host " \|- \$frameCountPart\$\(\$_\.Tag\.PadRight\(65\)\)'
     }
 
     It "uses the shared PixInsight image format helper" {

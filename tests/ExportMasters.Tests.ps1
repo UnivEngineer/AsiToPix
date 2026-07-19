@@ -37,6 +37,75 @@ Describe "WBPP master filename parsing" {
     }
 }
 
+Describe "Processing project metadata discovery" {
+    It "fuzzy-resolves an object name to its only processing project" {
+        $processingRoot = Join-Path -Path $TestDrive -ChildPath "single-processing\AstroPhoto\Processing"
+        $projectPath = Join-Path -Path $processingRoot -ChildPath "NGC 7293 - Helix nebula\2026_APO120_ASI2600MM"
+        $metadataPath = Join-Path -Path $projectPath -ChildPath "project_meta.json"
+        New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+        Set-Content -LiteralPath $metadataPath -Value "{}" -NoNewline
+
+        $candidates = @(Find-AsiToPixProcessingProjectMetadata `
+            -ProcessingRoot $processingRoot `
+            -ObjectName "Helix")
+        $resolvedPath = Resolve-AsiToPixProjectMetadataPath `
+            -InputValue "Helix" `
+            -ProcessingRoot $processingRoot
+
+        $candidates.Count | Should Be 1
+        $candidates[0].ObjectName | Should Be "NGC 7293 - Helix nebula"
+        $resolvedPath | Should Be $metadataPath
+    }
+
+    It "lists only exact catalog matches and accepts a one-based project index" {
+        $processingRoot = Join-Path -Path $TestDrive -ChildPath "multi-processing\AstroPhoto\Processing"
+        $firstProject = Join-Path -Path $processingRoot -ChildPath "M16\2025_Setup"
+        $secondProject = Join-Path -Path $processingRoot -ChildPath "M16\2026_Setup"
+        $otherObjectProject = Join-Path -Path $processingRoot -ChildPath "M17\2026_Setup"
+        foreach ($projectPath in @($firstProject, $secondProject, $otherObjectProject)) {
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $projectPath "project_meta.json") -Value "{}" -NoNewline
+        }
+        $selectionReader = {
+            param($Prompt)
+            $null = $Prompt
+            return "2"
+        }
+
+        $candidates = @(Find-AsiToPixProcessingProjectMetadata `
+            -ProcessingRoot $processingRoot `
+            -ObjectName "M 16")
+        $resolvedPath = Resolve-AsiToPixProjectMetadataPath `
+            -InputValue "M 16" `
+            -ProcessingRoot $processingRoot `
+            -SelectionReader $selectionReader
+
+        $candidates.Count | Should Be 2
+        @($candidates | Where-Object { $_.ObjectName -eq "M17" }).Count | Should Be 0
+        $resolvedPath | Should Be (Join-Path $secondProject "project_meta.json")
+    }
+
+    It "accepts a project folder as direct input" {
+        $projectPath = Join-Path -Path $TestDrive -ChildPath "direct-processing\Helix\2026_Setup"
+        $metadataPath = Join-Path -Path $projectPath -ChildPath "project_meta.json"
+        New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+        Set-Content -LiteralPath $metadataPath -Value "{}" -NoNewline
+
+        Resolve-AsiToPixProjectMetadataPath -InputValue $projectPath | Should Be $metadataPath
+    }
+
+    It "reports the searched Processing root when no object matches" {
+        $processingRoot = Join-Path -Path $TestDrive -ChildPath "missing-processing\AstroPhoto\Processing"
+        New-Item -ItemType Directory -Path $processingRoot -Force | Out-Null
+
+        {
+            Resolve-AsiToPixProjectMetadataPath `
+                -InputValue "Helix" `
+                -ProcessingRoot $processingRoot
+        } | Should Throw "No processing project matching object name 'Helix' with project_meta.json was found under '$processingRoot'."
+    }
+}
+
 Describe "Master export planning" {
     It "uses an existing singular mixed-case calibration folder" {
         $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "AstroPhoto"
@@ -162,6 +231,41 @@ Describe "Master export planning" {
         @($plan.Entries | Where-Object { $_.Status -eq "Duplicate" }).Count | Should Be 1
     }
 
+    It "reports differently sized logical flat duplicates as a conflict with choices" {
+        $pixPath = Join-Path -Path $TestDrive -ChildPath "flat-selection-project\Pix"
+        $masterPath = Join-Path -Path $pixPath -ChildPath "master"
+        New-Item -ItemType Directory -Path $masterPath -Force | Out-Null
+
+        $firstName = "masterFlat_BIN-1_6248x4176_FILTER-H_mono_TEMP--10C_GAIN-120_EXP-180s_FILTER-H_TARGET-H.xisf"
+        $secondName = "masterFlat_BIN-1_6248x4176_FILTER-H_mono_TEMP--10C_GAIN-120_EXP-300s_FILTER-H_TARGET-H.xisf"
+        Set-Content -LiteralPath (Join-Path $masterPath $firstName) -Value "short flat" -NoNewline
+        Set-Content -LiteralPath (Join-Path $masterPath $secondName) -Value "longer flat contents" -NoNewline
+
+        $destinationFolder = Join-Path -Path $TestDrive -ChildPath "Calibration\ASI2600MM\Master\flats\SQA55 @ 1.0x\26.07.15 H 180deg"
+        $metadata = [PSCustomObject]@{
+            PixPath = $pixPath
+            Scope = "SQA55 @ 1.0x"
+            Cameras = @([PSCustomObject]@{ Name = "ASI2600MM" })
+        }
+        $sourceRecord = [PSCustomObject]@{
+            Category = "Flats"
+            Camera = "ASI2600MM"
+            Gain = "120"
+            Temperature = "-10"
+            Exposure = "180"
+            Filter = "H"
+            DestinationFolder = $destinationFolder
+        }
+
+        $plan = Get-AsiToPixMasterExportPlan -Metadata $metadata -SourceRecord @($sourceRecord)
+        $selection = @($plan.Entries | Where-Object { $_.Status -eq "Conflict" })
+
+        $selection.Count | Should Be 1
+        $selection[0].ChoiceCandidates.Count | Should Be 2
+        $selection[0].Reason | Should Match "Select one"
+        $selection[0].DestinationPath | Should Be (Join-Path $destinationFolder "masterFlat_BIN-1_6248x4176.xisf")
+    }
+
     It "uses CalibrationSources metadata without reading project Source links" {
         $pixPath = Join-Path -Path $TestDrive -ChildPath "metadata-project\Pix"
         $masterPath = Join-Path -Path $pixPath -ChildPath "master"
@@ -266,7 +370,7 @@ Describe "Master export planning" {
         }
 
         $legacyPlan = Get-AsiToPixMasterExportPlan -Metadata $metadata -SourceRecord @($sourceRecord)
-        $legacyEntry = @($legacyPlan.Entries | Where-Object { $_.Status -eq "Legacy" })
+        $legacyEntry = @($legacyPlan.Entries | Where-Object { $_.Status -eq "Exists" })
 
         $legacyEntry.Count | Should Be 1
         $legacyEntry[0].ExistingMasterPath | Should Be $legacyPath
@@ -284,44 +388,54 @@ Describe "Master export planning" {
 }
 
 Describe "Master export application" {
-    It "copies a new master only after confirmation" {
-        $sourcePath = Join-Path -Path $TestDrive -ChildPath "apply-copy\source\masterDark.xisf"
-        $destinationPath = Join-Path -Path $TestDrive -ChildPath "apply-copy\destination\masterDark.xisf"
-        New-Item -ItemType Directory -Path (Split-Path $sourcePath -Parent) -Force | Out-Null
-        Set-Content -LiteralPath $sourcePath -Value "new master" -NoNewline
-        $sourceLength = (Get-Item -LiteralPath $sourcePath).Length
+    It "copies every planned master after one plan confirmation" {
+        $root = Join-Path -Path $TestDrive -ChildPath "apply-copy"
+        $firstSourcePath = Join-Path -Path $root -ChildPath "source\masterDark.xisf"
+        $secondSourcePath = Join-Path -Path $root -ChildPath "source\masterBias.xisf"
+        $firstDestinationPath = Join-Path -Path $root -ChildPath "destination\darks\masterDark_BIN-1_6248x4176.xisf"
+        $secondDestinationPath = Join-Path -Path $root -ChildPath "destination\biases\masterBias_BIN-1_6248x4176.xisf"
+        New-Item -ItemType Directory -Path (Split-Path -Path $firstSourcePath -Parent) -Force | Out-Null
+        Set-Content -LiteralPath $firstSourcePath -Value "new dark" -NoNewline
+        Set-Content -LiteralPath $secondSourcePath -Value "new bias" -NoNewline
         $plan = [PSCustomObject]@{
-            Entries = @([PSCustomObject]@{
-                Status = "Planned"
-                MasterType = "Dark"
-                SourcePath = $sourcePath
-                SourceLength = $sourceLength
-                DestinationPath = $destinationPath
-            })
+            Entries = @(
+                [PSCustomObject]@{
+                    Status = "Planned"; MasterType = "Dark"; SourcePath = $firstSourcePath
+                    SourceLength = (Get-Item -LiteralPath $firstSourcePath).Length; DestinationPath = $firstDestinationPath
+                },
+                [PSCustomObject]@{
+                    Status = "Planned"; MasterType = "Bias"; SourcePath = $secondSourcePath
+                    SourceLength = (Get-Item -LiteralPath $secondSourcePath).Length; DestinationPath = $secondDestinationPath
+                }
+            )
         }
-        $confirmationReader = { param($Prompt) $null = $Prompt; return [string][char]0x0434 }
+        $prompts = [System.Collections.Generic.List[string]]::new()
+        $confirmationReader = {
+            param($Prompt)
+            $prompts.Add($Prompt) | Out-Null
+            return "y"
+        }.GetNewClosure()
 
         $result = Invoke-AsiToPixMasterExportPlan `
             -Plan $plan `
             -ConfirmationReader $confirmationReader `
             -Confirm:$false
 
-        $result.CopiedCount | Should Be 1
-        (Get-Content -LiteralPath $destinationPath -Raw) | Should Be "new master"
+        $prompts.Count | Should Be 1
+        $result.CopiedCount | Should Be 2
+        (Get-Content -LiteralPath $firstDestinationPath -Raw) | Should Be "new dark"
+        (Get-Content -LiteralPath $secondDestinationPath -Raw) | Should Be "new bias"
     }
 
-    It "keeps a new master uncreated when copying is declined" {
+    It "keeps all planned masters uncreated when plan execution is declined" {
         $sourcePath = Join-Path -Path $TestDrive -ChildPath "apply-decline\source\masterBias.xisf"
-        $destinationPath = Join-Path -Path $TestDrive -ChildPath "apply-decline\destination\masterBias.xisf"
-        New-Item -ItemType Directory -Path (Split-Path $sourcePath -Parent) -Force | Out-Null
+        $destinationPath = Join-Path -Path $TestDrive -ChildPath "apply-decline\destination\masterBias_BIN-1_6248x4176.xisf"
+        New-Item -ItemType Directory -Path (Split-Path -Path $sourcePath -Parent) -Force | Out-Null
         Set-Content -LiteralPath $sourcePath -Value "new bias" -NoNewline
         $plan = [PSCustomObject]@{
             Entries = @([PSCustomObject]@{
-                Status = "Planned"
-                MasterType = "Bias"
-                SourcePath = $sourcePath
-                SourceLength = (Get-Item -LiteralPath $sourcePath).Length
-                DestinationPath = $destinationPath
+                Status = "Planned"; MasterType = "Bias"; SourcePath = $sourcePath
+                SourceLength = (Get-Item -LiteralPath $sourcePath).Length; DestinationPath = $destinationPath
             })
         }
         $confirmationReader = { param($Prompt) $null = $Prompt; return [string][char]0x043D }
@@ -335,118 +449,40 @@ Describe "Master export application" {
         Test-Path -LiteralPath $destinationPath | Should Be $false
     }
 
-    It "renames a legacy master without replacing its contents when accepted" {
-        $root = Join-Path -Path $TestDrive -ChildPath "apply-rename"
-        $sourcePath = Join-Path -Path $root -ChildPath "source\masterDark-source.xisf"
-        $destinationFolder = Join-Path -Path $root -ChildPath "destination"
-        $destinationPath = Join-Path -Path $destinationFolder -ChildPath "masterDark_BIN-1_6248x4176.xisf"
-        $legacyPath = Join-Path -Path $destinationFolder -ChildPath "masterDark_BIN-1_6248x4176_TEMP--10C_GAIN-120_EXP-180s.xisf"
-        New-Item -ItemType Directory -Path (Split-Path $sourcePath -Parent) -Force | Out-Null
-        New-Item -ItemType Directory -Path $destinationFolder -Force | Out-Null
-        Set-Content -LiteralPath $sourcePath -Value "new contents" -NoNewline
-        Set-Content -LiteralPath $legacyPath -Value "old contents" -NoNewline
-        $plan = [PSCustomObject]@{
-            Entries = @([PSCustomObject]@{
-                Status = "Legacy"
-                MasterType = "Dark"
-                SourcePath = $sourcePath
-                SourceLength = (Get-Item -LiteralPath $sourcePath).Length
-                DestinationPath = $destinationPath
-            })
-        }
-        $confirmationReader = { param($Prompt) $null = $Prompt; "y" }
-
-        $result = Invoke-AsiToPixMasterExportPlan `
-            -Plan $plan `
-            -ConfirmationReader $confirmationReader `
-            -Confirm:$false
-
-        $result.RenamedCount | Should Be 1
-        Test-Path -LiteralPath $legacyPath | Should Be $false
-        (Get-Content -LiteralPath $destinationPath -Raw) | Should Be "old contents"
-    }
-
-    It "replaces a legacy master transactionally after rename is declined" {
-        $root = Join-Path -Path $TestDrive -ChildPath "apply-replace"
-        $sourcePath = Join-Path -Path $root -ChildPath "source\masterDark-source.xisf"
-        $destinationFolder = Join-Path -Path $root -ChildPath "destination"
-        $destinationPath = Join-Path -Path $destinationFolder -ChildPath "masterDark_BIN-1_6248x4176.xisf"
-        $legacyPath = Join-Path -Path $destinationFolder -ChildPath "masterDark_BIN-1_6248x4176_TEMP--10C_GAIN-120_EXP-180s.xisf"
-        New-Item -ItemType Directory -Path (Split-Path $sourcePath -Parent) -Force | Out-Null
-        New-Item -ItemType Directory -Path $destinationFolder -Force | Out-Null
-        Set-Content -LiteralPath $sourcePath -Value "new replacement contents" -NoNewline
-        Set-Content -LiteralPath $legacyPath -Value "old contents" -NoNewline
-        $answers = [System.Collections.Queue]::new()
-        $answers.Enqueue("n")
-        $answers.Enqueue("y")
-        $confirmationReader = {
-            param($Prompt)
-            $null = $Prompt
-            return $answers.Dequeue()
-        }.GetNewClosure()
-        $plan = [PSCustomObject]@{
-            Entries = @([PSCustomObject]@{
-                Status = "Legacy"
-                MasterType = "Dark"
-                SourcePath = $sourcePath
-                SourceLength = (Get-Item -LiteralPath $sourcePath).Length
-                DestinationPath = $destinationPath
-            })
-        }
-
-        $result = Invoke-AsiToPixMasterExportPlan `
-            -Plan $plan `
-            -ConfirmationReader $confirmationReader `
-            -Confirm:$false
-
-        $result.ReplacedCount | Should Be 1
-        Test-Path -LiteralPath $legacyPath | Should Be $false
-        (Get-Content -LiteralPath $destinationPath -Raw) | Should Be "new replacement contents"
-        @(Get-ChildItem -LiteralPath $destinationFolder -File -Filter "*.AsToPixBackup-*").Count | Should Be 0
-    }
-
-    It "replaces an existing canonical master after confirmation" {
-        $root = Join-Path -Path $TestDrive -ChildPath "apply-overwrite"
+    It "does not overwrite an existing master or prompt for execution" {
+        $root = Join-Path -Path $TestDrive -ChildPath "apply-existing"
         $sourcePath = Join-Path -Path $root -ChildPath "source\masterBias-source.xisf"
         $destinationPath = Join-Path -Path $root -ChildPath "destination\masterBias_BIN-1_6248x4176.xisf"
-        New-Item -ItemType Directory -Path (Split-Path $sourcePath -Parent) -Force | Out-Null
-        New-Item -ItemType Directory -Path (Split-Path $destinationPath -Parent) -Force | Out-Null
+        New-Item -ItemType Directory -Path (Split-Path -Path $sourcePath -Parent) -Force | Out-Null
+        New-Item -ItemType Directory -Path (Split-Path -Path $destinationPath -Parent) -Force | Out-Null
         Set-Content -LiteralPath $sourcePath -Value "new bias contents" -NoNewline
-        Set-Content -LiteralPath $destinationPath -Value "old bias" -NoNewline
+        Set-Content -LiteralPath $destinationPath -Value "old bias contents" -NoNewline
         $plan = [PSCustomObject]@{
             Entries = @([PSCustomObject]@{
-                Status = "Exists"
-                MasterType = "Bias"
-                SourcePath = $sourcePath
-                SourceLength = (Get-Item -LiteralPath $sourcePath).Length
-                DestinationPath = $destinationPath
+                Status = "Exists"; MasterType = "Bias"; SourcePath = $sourcePath
+                SourceLength = (Get-Item -LiteralPath $sourcePath).Length; DestinationPath = $destinationPath
             })
         }
-        $confirmationReader = { param($Prompt) $null = $Prompt; "Y" }
+        $confirmationReader = { param($Prompt) $null = $Prompt; throw "Existing masters must not prompt." }
 
         $result = Invoke-AsiToPixMasterExportPlan `
             -Plan $plan `
             -ConfirmationReader $confirmationReader `
             -Confirm:$false
 
-        $result.ReplacedCount | Should Be 1
-        (Get-Content -LiteralPath $destinationPath -Raw) | Should Be "new bias contents"
-        @(Get-ChildItem -LiteralPath (Split-Path $destinationPath -Parent) -File -Filter "*.AsToPixBackup-*").Count |
-            Should Be 0
+        $result.CopiedCount | Should Be 0
+        (Get-Content -LiteralPath $destinationPath -Raw) | Should Be "old bias contents"
     }
 
     It "does not prompt or copy in WhatIf mode" {
         $sourcePath = Join-Path -Path $TestDrive -ChildPath "apply-whatif\source\masterFlat.xisf"
         $destinationPath = Join-Path -Path $TestDrive -ChildPath "apply-whatif\destination\masterFlat.xisf"
-        New-Item -ItemType Directory -Path (Split-Path $sourcePath -Parent) -Force | Out-Null
+        New-Item -ItemType Directory -Path (Split-Path -Path $sourcePath -Parent) -Force | Out-Null
         Set-Content -LiteralPath $sourcePath -Value "new flat" -NoNewline
         $plan = [PSCustomObject]@{
             Entries = @([PSCustomObject]@{
-                Status = "Planned"
-                MasterType = "Flat"
-                SourcePath = $sourcePath
-                SourceLength = (Get-Item -LiteralPath $sourcePath).Length
-                DestinationPath = $destinationPath
+                Status = "Planned"; MasterType = "Flat"; SourcePath = $sourcePath
+                SourceLength = (Get-Item -LiteralPath $sourcePath).Length; DestinationPath = $destinationPath
             })
         }
         $confirmationReader = { param($Prompt) $null = $Prompt; throw "WhatIf must not prompt." }
@@ -458,6 +494,82 @@ Describe "Master export application" {
             -Confirm:$false
 
         $result.WhatIfCount | Should Be 1
+        Test-Path -LiteralPath $destinationPath | Should Be $false
+    }
+
+    It "rebuilds the plan from an interactively selected conflict before execution" {
+        $root = Join-Path -Path $TestDrive -ChildPath "apply-selection"
+        $firstSourcePath = Join-Path -Path $root -ChildPath "source\masterFlat_EXP-180s.xisf"
+        $secondSourcePath = Join-Path -Path $root -ChildPath "source\masterFlat_EXP-300s.xisf"
+        $destinationPath = Join-Path -Path $root -ChildPath "destination\masterFlat_BIN-1_6248x4176.xisf"
+        New-Item -ItemType Directory -Path (Split-Path -Path $firstSourcePath -Parent) -Force | Out-Null
+        Set-Content -LiteralPath $firstSourcePath -Value "first flat" -NoNewline
+        Set-Content -LiteralPath $secondSourcePath -Value "second selected flat" -NoNewline
+        $firstCandidate = [PSCustomObject]@{
+            Status = "Candidate"; MasterType = "Flat"; SourcePath = $firstSourcePath
+            SourceLength = (Get-Item -LiteralPath $firstSourcePath).Length; DestinationPath = $destinationPath
+            ExistingMasterPath = $null; ExistingMasterCount = 0; DuplicateOf = $null; ChoiceCandidates = @(); Reason = $null
+        }
+        $secondCandidate = [PSCustomObject]@{
+            Status = "Candidate"; MasterType = "Flat"; SourcePath = $secondSourcePath
+            SourceLength = (Get-Item -LiteralPath $secondSourcePath).Length; DestinationPath = $destinationPath
+            ExistingMasterPath = $null; ExistingMasterCount = 0; DuplicateOf = $null; ChoiceCandidates = @(); Reason = $null
+        }
+        $plan = [PSCustomObject]@{
+            MasterPath = (Split-Path -Path $firstSourcePath -Parent); ProjectSourcePath = $root
+            XisfFileCount = 2; EligibleMasterCount = 2; IgnoredFileCount = 0; Diagnostics = @()
+            Entries = @([PSCustomObject]@{
+                Status = "Conflict"; MasterType = "Flat"; SourcePath = $firstSourcePath
+                SourceLength = $firstCandidate.SourceLength; DestinationPath = $destinationPath
+                ExistingMasterPath = $null; ExistingMasterCount = 0; DuplicateOf = $null
+                ChoiceCandidates = @($firstCandidate, $secondCandidate)
+                Reason = "Logical duplicates have different file sizes."
+            })
+        }
+        $selectionReader = { param($Prompt) $null = $Prompt; "2" }
+        $confirmationReader = { param($Prompt) $null = $Prompt; "y" }
+
+        $result = Invoke-AsiToPixMasterExportPlan `
+            -Plan $plan `
+            -SelectionReader $selectionReader `
+            -ConfirmationReader $confirmationReader `
+            -Confirm:$false
+
+        $result.SelectedCount | Should Be 1
+        $result.CopiedCount | Should Be 1
+        @($plan.Entries | Where-Object { $_.Status -eq "Conflict" }).Count | Should Be 0
+        @($plan.Entries | Where-Object { $_.Status -eq "Planned" }).Count | Should Be 1
+        (Get-Content -LiteralPath $destinationPath -Raw) | Should Be "second selected flat"
+    }
+
+    It "does not prompt for a duplicate conflict in WhatIf mode" {
+        $root = Join-Path -Path $TestDrive -ChildPath "apply-selection-whatif"
+        $firstSourcePath = Join-Path -Path $root -ChildPath "source\masterFlat_EXP-180s.xisf"
+        $secondSourcePath = Join-Path -Path $root -ChildPath "source\masterFlat_EXP-300s.xisf"
+        $destinationPath = Join-Path -Path $root -ChildPath "destination\masterFlat_BIN-1_6248x4176.xisf"
+        New-Item -ItemType Directory -Path (Split-Path -Path $firstSourcePath -Parent) -Force | Out-Null
+        Set-Content -LiteralPath $firstSourcePath -Value "first flat" -NoNewline
+        Set-Content -LiteralPath $secondSourcePath -Value "second selected flat" -NoNewline
+        $plan = [PSCustomObject]@{
+            Entries = @([PSCustomObject]@{
+                Status = "Conflict"; MasterType = "Flat"; DestinationPath = $destinationPath
+                ChoiceCandidates = @(
+                    [PSCustomObject]@{ Status = "Candidate"; MasterType = "Flat"; SourcePath = $firstSourcePath; SourceLength = (Get-Item -LiteralPath $firstSourcePath).Length; DestinationPath = $destinationPath },
+                    [PSCustomObject]@{ Status = "Candidate"; MasterType = "Flat"; SourcePath = $secondSourcePath; SourceLength = (Get-Item -LiteralPath $secondSourcePath).Length; DestinationPath = $destinationPath }
+                )
+            })
+        }
+        $inputReader = { param($Prompt) $null = $Prompt; throw "WhatIf must not prompt." }
+
+        $result = Invoke-AsiToPixMasterExportPlan `
+            -Plan $plan `
+            -SelectionReader $inputReader `
+            -ConfirmationReader $inputReader `
+            -WhatIf `
+            -Confirm:$false
+
+        $result.ConflictPendingCount | Should Be 1
+        $result.WhatIfCount | Should Be 0
         Test-Path -LiteralPath $destinationPath | Should Be $false
     }
 }

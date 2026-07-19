@@ -103,6 +103,6 @@ foreach ($setupGroup in ($report | Group-Object ImportRoot, Setup)) {
 
 $totalSeconds = [decimal](($report | Measure-Object -Property IntegrationSeconds -Sum).Sum)
 $totalDuration = Format-AsiToPixIntegrationTime -Seconds $totalSeconds
-Write-Host "[DONE] Total integration: " -ForegroundColor Green -NoNewline
+Write-Host "Total integration: " -ForegroundColor Green -NoNewline
 Write-Host $totalDuration -ForegroundColor Yellow -NoNewline
 Write-Host " ($totalFrames subs)" -ForegroundColor Gray

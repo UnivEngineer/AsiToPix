@@ -601,7 +601,7 @@ foreach ($p in @($sourcePath, $pixPath)) {
 }
 
 Write-Host ""
-$mergeFilters = Read-CreateProjectConfirmation -Prompt "Allow WBPP to merge sessions with filters None, IRC and Trib into a single one L?"
+$mergeFilters = Read-CreateProjectConfirmation -Prompt "Allow WBPP to merge OSC sessions with filters IRC and Trib into a single one L?"
 
 $asiairRoot = Join-Path -Path $baseZ -ChildPath "ASIAir"
 $objectRoot = Join-Path -Path $asiairRoot -ChildPath $astroObj
@@ -616,7 +616,7 @@ $pendingLinks = @()
  $camMap = @{}
 
 # Filter mapping: raw filter name from filename -> normalized output filter + WBPP target group
-# OSC (*MC): IRC/L/Trib -> L/RGB | None -> None/RGB | HO/UHC -> HO/HO | SO -> SO/SO
+# OSC (*MC): None/RGB -> RGB/RGB | IRC/L/Trib -> L/RGB | HO/UHC -> HO/HO | SO -> SO/SO
 # Mono (*MM): L -> L/RGB | None -> None/RGB | R/G/B -> R,G,B/RGB | H/Ha -> H/H | S/SII -> S/S | O/OIII -> O/O
 function Get-FilterMap($rawFilt, $camType) {
     $r = $rawFilt.Trim()
@@ -624,7 +624,7 @@ function Get-FilterMap($rawFilt, $camType) {
         switch -Regex ($r) {
             '^(IRC|Trib)$'         { return @{ Filter="L";    Target="RGB" } }
             '^L$'                  { return @{ Filter="L";    Target="RGB" } }
-            '^None$'               { return @{ Filter="None"; Target="RGB" } }
+            '^(None|RGB)$'         { return @{ Filter="RGB";  Target="RGB" } }
             '^(HO|UHC)$'           { return @{ Filter="HO";   Target="HO"  } }
             '^SO$'                 { return @{ Filter="SO";   Target="SO"  } }
             default                { return @{ Filter=$r;     Target=$r    } }
@@ -836,8 +836,10 @@ function ConvertTo-CreateProjectExposureNumber {
 
     $normalizedText = $ExposureText.Trim().Replace(",", ".")
     $valueText = $null
-    if ($normalizedText -match '^(?<value>\d+(?:\.\d+)?)\s*(?:m?s|sec(?:ond)?s?)$') {
+    $unit = $null
+    if ($normalizedText -match '^(?<value>\d+(?:\.\d+)?)\s*(?<unit>m?s|sec(?:ond)?s?)$') {
         $valueText = $Matches["value"]
+        $unit = $Matches["unit"]
     } elseif ($normalizedText -match '^(?<value>\d+(?:\.\d+)?)$') {
         $valueText = $Matches["value"]
     } else {
@@ -849,8 +851,32 @@ function ConvertTo-CreateProjectExposureNumber {
         [System.Globalization.NumberStyles]::Float,
         [System.Globalization.CultureInfo]::InvariantCulture
     )
+    if ($unit -eq "ms") {
+        $value = $value / 1000
+    }
 
     return $value.ToString("0.########", [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+function ConvertTo-CreateProjectTemperatureFolderName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Temperature
+    )
+
+    $temperatureText = ([string]$Temperature).Trim().Replace(",", ".")
+    if ($temperatureText -notmatch '^(?<value>-?\d+(?:\.\d+)?)\s*C?$') {
+        throw "Temperature value is not recognized: '$Temperature'."
+    }
+
+    $temperatureValue = [double]::Parse(
+        $Matches["value"],
+        [System.Globalization.NumberStyles]::Float,
+        [System.Globalization.CultureInfo]::InvariantCulture
+    )
+    $roundedTemperature = [Math]::Round($temperatureValue / 5.0) * 5
+
+    return "$($roundedTemperature.ToString('0', [System.Globalization.CultureInfo]::InvariantCulture))C"
 }
 
 function Get-CreateProjectCalibrationFile {
@@ -1000,8 +1026,7 @@ function Write-CreateProjectCalibrationDirectoryWarning {
 # Calibration Path Helper - $cb = calibration base for this session's camera
 function Get-CalibPath($type, $gain, $rawTemp, $expValue, $cb, $sessionDate) {
     $folderKind = switch($type) { "Darks" {"Dark"} "Biases" {"Bias"} "FlatDarks" {"FlatDark"} }
-    $numTemp = [double]($rawTemp -replace '[^-\d\.]', '')
-    $targetTempFolder = "$([Math]::Round($numTemp / 5.0) * 5)C"
+    $targetTempFolder = ConvertTo-CreateProjectTemperatureFolderName -Temperature $rawTemp
     $sessionDateObj = if ($sessionDate) { ConvertTo-CreateProjectDate -DateText $sessionDate } else { $null }
     $candidates = @()
     
@@ -1146,8 +1171,8 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
         $filt      = $fm.Filter
         $targetGrp = $fm.Target
 
-        # Optional: Merge IRC/None into L for OSC cameras if user agrees
-        if ($mergeFilters -and $sessionCamType -eq "OSC" -and ($rawFilt -eq "None" -or $rawFilt -eq "IRC" -or $rawFilt -eq "Trib")) {
+        # Optional: Merge OSC luminance filters into L while keeping unfiltered color data as RGB.
+        if ($mergeFilters -and $sessionCamType -eq "OSC" -and ($rawFilt -eq "IRC" -or $rawFilt -eq "Trib")) {
             $filt = "L"
             $targetGrp = "RGB"  # Ensure unified target group for merged filters
         }
@@ -1161,7 +1186,11 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
         $valExp  = if ($fName -match "_(\d+\.?\d*)s_") { $Matches[1] } else { "300" }
         $curExp  = $valExp.Replace(".0","") + "s"
         $curGain = if ($fName -match "_gain(\d+)") { $Matches[1] } else { "120" }
-        $curTemp = if ($fName -match "_(-?\d+\.?\d*)C_") { [double]$Matches[1] } else { -20.0 }
+        $curTemp = if ($fName -match "_(-?\d+\.?\d*)C_") {
+            [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture)
+        } else {
+            -20.0
+        }
         $curAngRaw = if ($fName -match "_(\d+)deg_") { $Matches[1] } else { $null }
         $numCurAng = if ($curAngRaw) { [int]$curAngRaw } else { -999 }
         $angDisp = if ($numCurAng -eq -999) { "Unknown" } else { "${numCurAng}deg" }
@@ -1170,7 +1199,7 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
         Write-Host ""
         Write-Host "  [$sessionCamFull/$sessionCamType] $sessionDate | Filter: $rawFilt -> $filt | Target: $targetGrp | Angle: $angDisp" -ForegroundColor Green
 
-        $roundT = "$([Math]::Round([double]$curTemp / 5.0) * 5)C"
+        $roundT = ConvertTo-CreateProjectTemperatureFolderName -Temperature $curTemp
         $sTag = "Session_${sessionDate}_Filter_${filt}_Target_${targetGrp}_Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Cam_${sessionCamFull}"
         $cTag = "Gain_${curGain}_Temp_${roundT}_Exp_${curExp}_Cam_${sessionCamFull}"
 
@@ -1186,6 +1215,7 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
             Filter      = $filt
             Session     = $sessionDate
             Target      = $targetGrp
+            FrameCount  = $imageFiles.Count
         }
 
         # --- FLATS SEARCH ---
@@ -1722,8 +1752,8 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
             $fSample = Get-ChildItem -LiteralPath $fFound.FullName -File -ErrorAction Stop |
                 Where-Object { Test-AsiToPixSupportedImageFileName -FileName $_.Name } |
                 Select-Object -First 1
-            if ($fSample -and ($fSample.Name -match "_(\d+\.?\d*)m?s_")) {
-                $fdExp = $Matches[1] + "s"
+            if ($fSample -and ($fSample.Name -match "_(?<flatExposure>\d+(?:\.\d+)?m?s)_")) {
+                $fdExp = "$(ConvertTo-CreateProjectExposureNumber -ExposureText $Matches['flatExposure'])s"
                 $fd = Get-CalibPath "FlatDarks" $curGain $curTemp $fdExp $sessionCalibBase $sessionDate
                 if ($fd) {
                     $fdTag = "Exp_${fdExp}_Gain_${curGain}_Temp_${roundT}_Target_${targetGrp}_Filter_${filt}_Cam_${sessionCamFull}"
@@ -1817,10 +1847,20 @@ foreach ($cam in $camMap.Keys) {
 Write-Host "`n--- PROJECT TREE: $setupRoot ---" -ForegroundColor Cyan
 $pendingLinks | Group-Object Type | ForEach-Object {
     Write-Host "[$($_.Name)]"  -ForegroundColor Yellow
+    $frameCountWidth = 0
+    if ($_.Name -eq "Lights") {
+        $maxFrameCount = ($_.Group | Measure-Object -Property FrameCount -Maximum).Maximum
+        $frameCountWidth = ([string]$maxFrameCount).Length
+    }
     $_.Group | Sort-Object Tag, Cam | ForEach-Object {
         # Using a slightly smaller PadRight for better window fit
         $camPart = if ($_.Cam) { " [$($_.Cam)]" } else { "" }
-        Write-Host " |- $($_.Tag.PadRight(65)) <-- $($_.Display)$camPart" -ForegroundColor Gray
+        $frameCountPart = if ($_.Type -eq "Lights") {
+            ("[$($_.FrameCount)]").PadRight($frameCountWidth + 2) + " "
+        } else {
+            ""
+        }
+        Write-Host " |- $frameCountPart$($_.Tag.PadRight(65)) <-- $($_.Display)$camPart" -ForegroundColor Gray
     }
 }
 

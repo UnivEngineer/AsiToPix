@@ -72,6 +72,10 @@
 - [ ] После каждого изменения показывать `git diff`.
 ## Recent fixes
 
+- [x] `CreateProject.ps1`: normalize fractional temperatures independently of the Windows decimal separator so values such as `-9.8C` still select the `-10C` dark/bias folders.
+- [x] `CreateProject.ps1`: convert millisecond flat exposures to seconds before matching flat-darks (`490ms` -> `0.49s`).
+- [x] `CreateProject.ps1`: show the number of supported light frames for every session in the final project tree.
+- [x] `CreateProject.ps1`: map unfiltered OSC lights to `Filter_RGB_Target_RGB`; reserve `Filter_L_Target_RGB` for actual OSC luminance filters such as IRC and Trib.
 - [x] Use format-neutral scan messages now that imports support FITS, XISF, RAW, and bitmap images.
 - [x] Ignore ASIAir `*_thn.jpg` thumbnail files in all shared image scans.
 - [x] Share PixInsight image extensions and case-insensitive singular/plural frame-folder conventions across all import/report/project/export scripts.
@@ -101,5 +105,7 @@
 - [x] `CreateProject.ps1`: require exact normalized exposure matches so 60s lights cannot select 600sec dark folders.
 - [x] `ImportSession.ps1`: allow the first source prompt to accept an object name and fuzzy-search matching default Import sessions.
 - [x] `CreateProject.ps1`: allow the first lights prompt to accept an object name and fuzzy-search matching ASIAir archive projects.
+- [x] `ExportMasters.ps1`: allow the first metadata prompt to accept an object name and fuzzy-search matching projects under `AstroPhoto\Processing`.
+- [x] `ExportMasters.ps1`: show compact camera/type/setup trees, resolve differing logical duplicates as conflicts, and execute only new copies after one plan confirmation without overwriting existing masters.
 - [x] `CreateProject.ps1`: warn when an ASIAir light session folder contains mixed exposures without changing project links.
 - [x] `ImportSession.ps1`/`ImportAll.ps1`: split imported light folders by exposure suffix when one filter/night contains mixed exposures, for example `26.07.10-180s`.

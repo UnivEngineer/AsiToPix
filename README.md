@@ -209,11 +209,15 @@ Copy the complete TSV table to the clipboard for direct paste into Google Sheets
 .\Get-ImportReport.ps1 -ImportPath 'D:\AstroPhoto\Import' -Tsv | Set-Clipboard
 ```
 
+The normal interactive report also asks `Copy TSV table to clipboard? y/N` at the end; answer `y` to copy the same full TSV table.
+
 TSV exposure cells are Google Sheets formulas beginning with `=`; filters without frames are emitted as empty cells.
 The TSV data columns are `Catalog number`, `Name`, `Exposure`, `RGB`, `L`, `R`, `G`, `B`, `HO`, `SO`, `Ha`, `OIII`, and `SII`.
 The console report remains compact and uses the `RGB`, `L`, `H`, `O`, and `S` columns.
 
 For each staged object, the report searches the sibling `AstroPhoto\ASIAir` library and matches either the catalog number or readable name against folders such as `M 16 - Eagle nebula`. Catalog compositions separated by `+`, such as `M 8 + M 20 - Lagoon + Trifid nebulae`, are matched by their complete catalog-number set and are not confused with an individual object such as `M 8`. The import workflows use the same matching convention. If no unique match is available, the report prints a warning and puts the original Import folder name in both TSV name columns.
+
+Within each setup, TSV rows are sorted by the last word of the resolved `Name`: nebulae first, then galaxies (including clouds), then clusters, followed by unclassified objects. Singular and plural type names are equivalent. The compact console report keeps its existing object order.
 
 Multiple import roots can be supplied as an array:
 
@@ -305,6 +309,24 @@ The script prints the recommended pre/post keyword placement and a camera/filter
 ### 6. Export WBPP masters
 
 The first prompt and `-MetaPath` accept either a `project_meta.json` path, a processing project folder, or an object name. An object name is fuzzy-matched below `AstroPhoto\Processing`; if several projects match, select one by its displayed index.
+
+### Clean WBPP temporary files
+
+`CleanupWbpp.ps1` scans all projects with `project_meta.json` below `AstroPhoto\Processing` and asks separately before cleaning each project that contains removable files. It shows reclaimable space in GB, removes files below the project's `Pix` folder, including calibration masters, and preserves only `masterLight*.*` files. Empty WBPP output folders are removed; folders needed by preserved light masters remain. The final summary reports the total space reclaimed, or the total that would be reclaimed in `-WhatIf` mode.
+
+Preview all proposed removals without changing files:
+
+```powershell
+.\CleanupWbpp.ps1 -AstroPhotoRoot 'D:\AstroPhoto' -WhatIf
+```
+
+Run the interactive cleanup:
+
+```powershell
+.\CleanupWbpp.ps1 -AstroPhotoRoot 'D:\AstroPhoto'
+```
+
+For a nonstandard location, pass `-ProcessingRoot` directly. `project_meta.json` is used only to identify a project; the cleanup always uses the sibling `<project_dir>\Pix` folder and does not depend on paths or other values stored in the JSON. Reparse points are skipped.
 
 For example, preview the only processing project matching `Helix`:
 

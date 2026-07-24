@@ -441,7 +441,10 @@ function Get-AsiToPixImportReportLine {
         $lines.Add($setupCells -join "`t")
         $lines.Add(@("Catalog number", "Name", "Exposure", "RGB", "L", "R", "G", "B", "HO", "SO", "Ha", "OIII", "SII") -join "`t")
 
-        foreach ($row in $setupGroups[$setupIndex].Group) {
+        $sortableRows = [System.Collections.Generic.List[object]]::new()
+        $groupRows = @($setupGroups[$setupIndex].Group)
+        for ($rowIndex = 0; $rowIndex -lt $groupRows.Count; $rowIndex++) {
+            $row = $groupRows[$rowIndex]
             $importRootKey = [string]$row.ImportRoot
             if (-not $archiveIndexes.ContainsKey($importRootKey)) {
                 $archiveIndexes[$importRootKey] = Get-AsiToPixArchiveObjectIndex -ImportRoot $importRootKey
@@ -455,7 +458,25 @@ function Get-AsiToPixImportReportLine {
                     Write-Warning $objectResolutions[$resolutionKey].Warning
                 }
             }
+
             $objectResolution = $objectResolutions[$resolutionKey]
+            $typeOrder = switch -Regex ($objectResolution.Name.Trim()) {
+                '(?i)(nebula|nebulae|nebulas)[\s\p{P}]*$' { 0; break }
+                '(?i)(galaxy|galaxies|cloud|clouds)[\s\p{P}]*$' { 1; break }
+                '(?i)(cluster|clusters)[\s\p{P}]*$' { 2; break }
+                default { 3 }
+            }
+            $sortableRows.Add([PSCustomObject]@{
+                Row         = $row
+                Resolution  = $objectResolution
+                TypeOrder   = $typeOrder
+                OriginalRow = $rowIndex
+            })
+        }
+
+        foreach ($sortableRow in $sortableRows | Sort-Object TypeOrder, OriginalRow) {
+            $row = $sortableRow.Row
+            $objectResolution = $sortableRow.Resolution
             $exposureText = ConvertTo-AsiToPixReportNumber -Value $row.Exposure
             $filterCells = @(
                 $row.TsvRGB,

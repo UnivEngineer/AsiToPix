@@ -127,6 +127,25 @@ Describe "Import report" {
         $output[0] | Should Be "APO120`t0.8x`r`n$header`r`n$dataRow"
     }
 
+    It "copies the full TSV after an interactive confirmation" {
+        $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "interactive-clipboard\AstroPhoto"
+        $importPath = Join-Path -Path $astroPhotoRoot -ChildPath "Import"
+        $objectPath = Join-Path -Path $importPath -ChildPath "APO120 @ 0.8x\Light\M 16"
+        $archiveObjectPath = Join-Path -Path $astroPhotoRoot -ChildPath "ASIAir\M 16 - Eagle nebula"
+        New-Item -ItemType Directory -Path $objectPath -Force | Out-Null
+        New-Item -ItemType Directory -Path $archiveObjectPath -Force | Out-Null
+        New-Item -ItemType File -Path (Join-Path -Path $objectPath -ChildPath "Light_M16_180.0s_Bin1_2600MM_H_gain120_20260710-051612_0deg_-10.0C_APO120_0001.fit") | Out-Null
+        $scriptPath = Join-Path -Path $PSScriptRoot -ChildPath "..\Get-ImportReport.ps1"
+
+        Mock Read-Host { "y" }
+        Mock Set-Clipboard {}
+
+        & $scriptPath -ImportPath $importPath
+
+        Assert-MockCalled Set-Clipboard -Times 1 -Exactly
+        Assert-MockCalled Set-Clipboard -ParameterFilter { $Value -match "Catalog number`tName`tExposure" } -Times 1 -Exactly
+    }
+
     It "uses the import folder name for both TSV name columns when archive matching is ambiguous" {
         $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "ambiguous-name\AstroPhoto"
         $importPath = Join-Path -Path $astroPhotoRoot -ChildPath "Import"
@@ -167,6 +186,68 @@ Describe "Import report" {
         $resolution.CatalogNumber | Should Be "M 8 + M 20"
         $resolution.Name | Should Be "Lagoon + Trifid nebulae"
         $resolution.Warning | Should Be ""
+    }
+
+    It "sorts TSV rows by the object type at the end of the resolved name" {
+        $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "type-order\AstroPhoto"
+        $importPath = Join-Path -Path $astroPhotoRoot -ChildPath "Import"
+        $archivePath = Join-Path -Path $astroPhotoRoot -ChildPath "ASIAir"
+        New-Item -ItemType Directory -Path $importPath -Force | Out-Null
+        @(
+            "Mars - Mars",
+            "NGC 104 - 47 Tuc cluster",
+            "LMC - Large Magellanic Cloud",
+            "NGC 4565 - Needle galaxy",
+            "M 8 + M 20 - Lagoon + Trifid nebulae",
+            "M 42 - Orion nebula",
+            "NGC 4038 + NGC 4039 - Antennae galaxies",
+            "NGC 869 + NGC 884 - Double clusters"
+        ) | ForEach-Object {
+            New-Item -ItemType Directory -Path (Join-Path -Path $archivePath -ChildPath $_) -Force | Out-Null
+        }
+
+        $objects = @(
+            "Mars",
+            "NGC 104",
+            "LMC",
+            "NGC 4565",
+            "M 8 + M 20",
+            "M 42",
+            "NGC 4038 + NGC 4039",
+            "NGC 869 + NGC 884"
+        )
+        $report = foreach ($objectName in $objects) {
+            [PSCustomObject]@{
+                ImportRoot = $importPath
+                Setup      = "APO120 @ 0.8x"
+                Object     = $objectName
+                Exposure   = 180
+                TsvRGB     = ""
+                TsvL       = ""
+                TsvR       = ""
+                TsvG       = ""
+                TsvB       = ""
+                TsvHO      = ""
+                TsvSO      = ""
+                TsvHa      = ""
+                TsvOIII    = ""
+                TsvSII     = ""
+            }
+        }
+
+        $lines = @(Get-AsiToPixImportReportLine -Report $report)
+        $names = @($lines | Select-Object -Skip 2 | ForEach-Object { ($_ -split "`t")[1] })
+
+        $names | Should Be @(
+            "Lagoon + Trifid nebulae",
+            "Orion nebula",
+            "Large Magellanic Cloud",
+            "Needle galaxy",
+            "Antennae galaxies",
+            "47 Tuc cluster",
+            "Double clusters",
+            "Mars"
+        )
     }
 
     It "keeps every full TSV filter separate while the console report stays compact" {

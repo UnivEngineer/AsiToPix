@@ -43,6 +43,43 @@ Describe "CreateProject WBPP calibration tags" {
         $scriptText | Should Not Match 'Target_DUMMY|Filter_DUMMY|Session_DUMMY|Exp_DUMMY'
     }
 
+    It "handles repeated source calibrations with one unique tag under StrictMode" {
+        $tokens = $null
+        $parseErrors = $null
+        $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            $scriptPath,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        $functionNames = @(
+            'Get-CreateProjectDuplicateCalibrationKey',
+            'Write-CreateProjectDuplicateCalibrationWarning'
+        )
+        $functionAsts = @($scriptAst.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -in $functionNames
+        }, $true))
+        $pendingLinks = @(1..3 | ForEach-Object {
+            [PSCustomObject]@{
+                Type = 'Darks'
+                Tag = 'FlatSet_same_Gain_120_Temp_-10C_Exp_60s_Target_L_Filter_L_Cam_ASI2600MM'
+                Src = 'C:\Calibration\ASI2600MM\Source\darks\Gain120\-10C\60sec\25.09'
+                Display = 'Source\darks\Gain120\-10C\60sec\25.09'
+            }
+        })
+
+        {
+            & {
+                Set-StrictMode -Version Latest
+                foreach ($functionAst in $functionAsts) {
+                    . ([scriptblock]::Create($functionAst.Extent.Text))
+                }
+                Write-CreateProjectDuplicateCalibrationWarning -PendingLink $pendingLinks
+            }
+        } | Should Not Throw
+    }
+
     It "does not use prefix matching for calibration exposure folders" {
         $scriptText | Should Match 'ConvertTo-CreateProjectExposureNumber -ExposureText \$pathPart'
         $scriptText | Should Match '\$null -ne \$folderExp -and \$folderExp -eq \$cleanExp'

@@ -108,3 +108,10 @@ $totalDuration = Format-AsiToPixIntegrationTime -Seconds $totalSeconds
 Write-Host "Total integration: " -ForegroundColor Green -NoNewline
 Write-Host $totalDuration -ForegroundColor Yellow -NoNewline
 Write-Host " ($totalFrames subs)" -ForegroundColor Gray
+
+$clipboardAnswer = (Read-Host "Copy TSV table to clipboard? y/N").Trim()
+if ($clipboardAnswer -match '^[yYдД]') {
+    $tsvText = (@(Get-AsiToPixImportReportLine -Report $report) -join "`r`n")
+    Set-Clipboard -Value $tsvText
+    Write-Host "[INFO] TSV table copied to clipboard." -ForegroundColor Green
+}

@@ -72,6 +72,13 @@
 - [ ] После каждого изменения показывать `git diff`.
 ## Recent fixes
 
+- [x] `CleanupWbpp.ps1`: show per-project reclaimable space in GB and report the total reclaimed or previewed size in the final summary.
+- [x] `CleanupWbpp.ps1`: always clean the sibling `<project_dir>\Pix` folder so renamed projects work even when `project_meta.json` contains stale paths.
+- [x] `CleanupWbpp.ps1`: scan processing projects, confirm each cleanup separately, remove WBPP outputs and calibration masters, preserve `masterLight*.*`, and support safe `-WhatIf` previews.
+- [x] `CreateProject.ps1`: parse exposure-suffixed light-session dates and date exported masters from their mirrored Source folders so a matching master consistently wins over its raw frames.
+- [x] `CreateProject.ps1`: keep duplicate Source calibration warnings working under `StrictMode` when repeated links have only one unique WBPP tag.
+- [x] `Get-ImportReport.ps1`: offer to copy the full TSV table to the clipboard after the interactive report.
+- [x] Sort full TSV rows by the resolved name suffix: nebulae, galaxies/clouds, clusters, then unclassified objects, with singular and plural forms treated equally.
 - [x] Match `+`-separated catalog compositions by the complete object list in import selection and TSV catalog/name resolution, so `M 8` and `M 8 + M 20` are not ambiguous.
 - [x] `CreateProject.ps1`: deduplicate flat links and project metadata by the case-insensitive canonical physical source path; remove light session/exposure from flat tags and add optional stable `FLATSET` identity for compatibility collisions.
 - [x] `Get-ImportReport.ps1`: emit full Google Sheets TSV columns, including characteristic `Exposure`, with `=` formulas; resolve catalog/name pairs from the sibling ASIAir library, warn and fall back on missing or ambiguous matches, and return one clipboard-safe multiline string.

@@ -688,10 +688,11 @@ function Write-CreateProjectDuplicateCalibrationWarning {
         $first = $group.Group[0]
         Write-Host "    [$($first.Type)] $($group.Count)x <-- $($first.Display)" -ForegroundColor Yellow
         Write-Host "      Source: $($first.Src)" -ForegroundColor DarkGray
-        foreach ($tag in @($group.Group | Select-Object -ExpandProperty Tag -Unique | Select-Object -First 6)) {
+        $uniqueTags = @($group.Group | Select-Object -ExpandProperty Tag -Unique)
+        foreach ($tag in @($uniqueTags | Select-Object -First 6)) {
             Write-Host "      Tag: $tag" -ForegroundColor DarkGray
         }
-        if (($group.Group | Select-Object -ExpandProperty Tag -Unique).Count -gt 6) {
+        if ($uniqueTags.Count -gt 6) {
             Write-Host "      ..." -ForegroundColor DarkGray
         }
     }
@@ -708,10 +709,15 @@ function ConvertTo-CreateProjectDate {
         [string]$DateText
     )
 
+    $normalizedDateText = $DateText.Trim()
+    if ($normalizedDateText -match '^(?<date>\d{2}\.\d{2}\.\d{2,4})(?:-|$)') {
+        $normalizedDateText = $Matches['date']
+    }
+
     foreach ($format in @('yy.MM.dd', 'dd.MM.yy', 'dd.MM.yyyy')) {
         try {
             $parsedDate = [datetime]::ParseExact(
-                $DateText,
+                $normalizedDateText,
                 $format,
                 [System.Globalization.CultureInfo]::InvariantCulture
             )
@@ -975,11 +981,21 @@ function Get-CreateProjectCalibrationDate {
         $SessionDate = $null
     )
 
-    $fileDates = @(Get-CreateProjectCalibrationFile -Path $Path -First 20 |
-        ForEach-Object {
-            Get-CreateProjectDateFromFileName -FileName $_.Name
-        } |
-        Where-Object { $null -ne $_ })
+    $dateSourcePaths = @($Path)
+    $sourceCounterpartPath = Get-CreateProjectSourceCounterpartPath -Path $Path
+    if (-not [string]::IsNullOrWhiteSpace($sourceCounterpartPath)) {
+        $dateSourcePaths += $sourceCounterpartPath
+    }
+
+    $fileDates = @(
+        foreach ($dateSourcePath in $dateSourcePaths) {
+            Get-CreateProjectCalibrationFile -Path $dateSourcePath -First 20 |
+                ForEach-Object {
+                    Get-CreateProjectDateFromFileName -FileName $_.Name
+                } |
+                Where-Object { $null -ne $_ }
+        }
+    )
 
     if ($fileDates.Count -gt 0) {
         if ($null -ne $SessionDate) {
@@ -990,6 +1006,34 @@ function Get-CreateProjectCalibrationDate {
     }
 
     return Get-CreateProjectDateFromPath -Path $Path
+}
+
+function Get-CreateProjectSourceCounterpartPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $separator = [string][System.IO.Path]::DirectorySeparatorChar
+    $masterMarker = "${separator}Master${separator}"
+    $markerIndex = $fullPath.IndexOf(
+        $masterMarker,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+    if ($markerIndex -lt 0) {
+        return $null
+    }
+
+    $sourceMarker = "${separator}Source${separator}"
+    $sourcePath = $fullPath.Substring(0, $markerIndex) +
+        $sourceMarker +
+        $fullPath.Substring($markerIndex + $masterMarker.Length)
+    if (Test-Path -LiteralPath $sourcePath -PathType Container) {
+        return $sourcePath
+    }
+
+    return $null
 }
 
 function ConvertTo-CreateProjectTemperatureFolderKey {

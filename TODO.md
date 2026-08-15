@@ -72,6 +72,16 @@
 - [ ] После каждого изменения показывать `git diff`.
 ## Recent fixes
 
+- [x] `IntegrateTotality.ps1`: optionally reuse a running PixInsight instance through IPC, wait on the status manifest, and never close the reused application.
+- [x] `IntegrateTotality.ps1`: prompt for Registered or Debayered integration input, with `-InputStage` for automation and stage-specific readiness diagnostics.
+- [x] `IntegrateTotality.ps1`: ignore registered filename suffixes after the frame index and include the exposure label in integrated block filenames.
+- [x] `IntegrateTotality.ps1`: report suspicious C2/C3 manifest indexes with the raw range and explicit JSON `null` guidance.
+- [x] `IntegrateTotality.ps1`: represent an absent C2 or C3 boundary as JSON `null` instead of an out-of-range sentinel index.
+- [x] `IntegrateTotality.ps1`: replace phase folders with `Frames\manifest.json`, prompt for missing manifest fields, exclude declared transitions, and label C2/Totality/C3 integration outputs.
+- [x] `IntegrateTotality.ps1`: make Enter select automatic gap splitting, align explicit nominal block sizes to a detected zero/one sequence origin, and reject internal index gaps.
+- [x] `IntegrateTotality.js`: assign the complete ImageIntegration `images` parameter table at once so PixInsight receives every manifest frame.
+- [x] `IntegrateTotality.ps1`: confirm the displayed plan, process all blocks in one PixInsight instance, and retain status diagnostics instead of inferring success from a GUI-process exit code.
+- [x] Add `IntegrateTotality.ps1` and a manifest-driven PixInsight script to split registered eclipse sequences by nominal index ranges or missing indexes and save non-overwriting ImageIntegration blocks.
 - [x] `CleanupWbpp.ps1`: show per-project reclaimable space in GB and report the total reclaimed or previewed size in the final summary.
 - [x] `CleanupWbpp.ps1`: always clean the sibling `<project_dir>\Pix` folder so renamed projects work even when `project_meta.json` contains stale paths.
 - [x] `CleanupWbpp.ps1`: scan processing projects, confirm each cleanup separately, remove WBPP outputs and calibration masters, preserve `masterLight*.*`, and support safe `-WhatIf` previews.

@@ -40,6 +40,7 @@ ASIAir archive + calibration library
 | `Get-ImportReport.ps1` | Reports frame counts, per-night exposure expressions, and integration time from supported images in staging folders; can emit TSV. |
 | `CreateProject.ps1` | Selects supported light images and matching calibration data, then creates a WBPP-ready project with directory symlinks or copied files. |
 | `ExportMasters.ps1` | Plans and interactively copies, renames, or replaces WBPP `.xisf` masters in the calibration `Master` tree. |
+| `IntegrateTotality.ps1` | Splits registered eclipse frames into nominal-index or index-gap blocks and invokes PixInsight ImageIntegration for each block. |
 | `CombineSeasons.ps1` | Combines the `Source` trees of selected processing projects into `Combined\Source`. |
 | `Init.cmd` | Configures the current-user PowerShell execution policy and, when elevated, Windows symlink evaluation and long-path support. |
 | `Run-CreateProject.cmd` | Launches `CreateProject.ps1` with `pwsh`, falling back to Windows PowerShell. |
@@ -373,6 +374,69 @@ Apply it interactively:
 The exporter reads `.xisf` bias, dark, and flat masters from `Pix\master`, strips generated WBPP tags from canonical filenames, deduplicates masters that map to the same destination, and asks before each copy, rename, or replacement. Conflicts are reported rather than overwritten.
 
 `-AstroPhotoRoot` is normally unnecessary for schema-version-2 metadata, but it can be supplied for older projects that require archive link discovery.
+
+### Integrate totality sequences
+
+`IntegrateTotality.ps1` reads one human-editable frame manifest and splits registered eclipse frames into ImageIntegration blocks. Each exposure uses this structure:
+
+```text
+Total-100ms\Frames\
+├── manifest.json
+├── raw\
+├── calibrated\
+├── debayered\
+├── registered\
+└── integrated\
+```
+
+The required manifest properties are:
+
+```json
+{
+    "BlockLength": 30,
+    "BlockStartIndex": 1,
+    "C2Index": 22,
+    "C3Index": 183,
+    "SkipIndices": [1, 2, 31, 61, 62, 91, 92]
+}
+```
+
+`BlockLength` and `BlockStartIndex` define nominal source-index ranges. `SkipIndices` lists transition frames that must not be integrated. `C2Index` and `C3Index` delimit totality. Set a boundary to JSON `null` when it is absent, for example `"C2Index": null` when there are no pre-totality Baily's beads; do not use an out-of-range sentinel index. A boundary other than `null` must be an integer in the actual raw-frame index range; otherwise the error identifies the suspicious value and shows the correct `null` syntax. Additional user properties such as `RegistrationIndex` are preserved but ignored by integration. If the manifest or any required property is missing, the script asks for the missing values and writes a completed UTF-8 JSON manifest. Press Enter at an interactive C2/C3 prompt to store `null`. Index lists accept comma-separated values and ranges such as `1,2,31,61-62`; JSON whitespace and line breaks between array elements are allowed.
+
+Preview a plan without creating integration outputs or launching PixInsight:
+
+```powershell
+.\IntegrateTotality.ps1 `
+    -Exposure 'Total-100ms' `
+    -InputStage Registered `
+    -PixInsightMode Reuse `
+    -WhatIf
+```
+
+Run the manifest plan:
+
+```powershell
+.\IntegrateTotality.ps1 `
+    -Exposure 'Total-100ms' `
+    -InputStage Debayered `
+    -PixInsightMode Dedicated
+```
+
+If `-InputStage` is omitted, the script asks whether to integrate `Registered` (the default) or `Debayered` frames. If PixInsight is already running and `-PixInsightMode` is omitted, the script asks whether to reuse the first available IPC instance (the default) or start a dedicated automation instance. `Reuse` sends the integration script with PixInsight's `--execute` IPC command and never sends `--force-exit`, so the user's application and its existing image windows remain open. ImageIntegration occupies that PixInsight instance while it runs; choose `Dedicated` when the user must continue working in the existing instance concurrently. `Dedicated` uses a separate `-n --automation-mode` instance and closes only that instance after completion. The default root is `C:\AstroPhoto\Processing\Totality`; use `-ProcessingRoot` for another location. `-ManifestPath` can select a non-default manifest. PixInsight is discovered under Program Files or from `PATH`, and `-PixInsightPath` can override it. The complete approved plan is passed to [`pixinsight/IntegrateTotality.js`](pixinsight/IntegrateTotality.js) through a separate temporary machine manifest, so the human manifest and source files remain untouched during integration.
+
+If C2 occurs inside a nominal block, that block and the preceding available block are labeled `BeadsC2`. If C3 occurs inside a block, that block and the following available block are labeled `BeadsC3`. When a boundary coincides with a nominal range boundary, only the block outside totality receives the beads label. Blocks farther outside the C2/C3 neighborhood are omitted from the integration plan.
+
+Outputs use this layout and naming scheme:
+
+```text
+<processing root>\Total-100ms\Frames\integrated\Block_001_100ms_BeadsC2_00003_00030.xisf
+<processing root>\Total-100ms\Frames\integrated\Block_002_100ms_Totality_00032_00060.xisf
+<processing root>\Total-100ms\Frames\integrated\Block_008_100ms_BeadsC3_00211_00240.xisf
+```
+
+Input discovery reads the index from the stable `*_<exposure>_<index>` part of each supported filename. Any suffix after the index is ignored, so names such as `Totality_100ms_00001_c_d_r.xisf` and `Totality_100ms_00001_c_cc_d_r.xisf` resolve to the same index. Before confirmation, the script prints each nominal range, phase label, indexes to integrate, manifest exclusions, input-stage readiness, full output path, and PixInsight execution mode. Missing raw or selected-input indexes reject only the affected block. Existing output files are skipped and never overwritten. After printing the plan, the script asks `Execute plan? [Y/n]`; Enter, `y`, `Y`, `д`, and `Д` approve it, while `n`, `N`, `н`, and `Н` cancel it. `-WhatIf` does not ask this question.
+
+PixInsight writes a JSON status file before and after every block. PowerShell treats the run as successful only when that status is `completed` and every expected XISF exists; a missing GUI-process exit code is never interpreted as success. On failure, the error reports a retained temporary diagnostics directory containing the plan, last status, and redirected process output. Outputs completed before a later block fails remain in place and are skipped safely on the next run.
 
 ### 7. Combine processing seasons
 

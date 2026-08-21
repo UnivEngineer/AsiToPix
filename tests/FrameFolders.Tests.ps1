@@ -41,4 +41,16 @@ Describe "Shared frame folder conventions" {
         Get-AsiToPixCanonicalFrameFolderName -Kind Flat | Should Be "flats"
         Get-AsiToPixCanonicalFrameFolderName -Kind FlatDark | Should Be "flat-darks"
     }
+
+    It "treats a flat exposure suffix as neutral metadata, not a rotator angle" {
+        $withAngle = Get-AsiToPixFlatFolderInfo -Name "26.04.08 L 2deg 800ms"
+        $withoutAngle = Get-AsiToPixFlatFolderInfo -Name "26.04.08 L 800ms"
+
+        $withAngle.DateText | Should Be "26.04.08"
+        $withAngle.FilterName | Should Be "L"
+        $withAngle.AngleDegrees | Should Be "2"
+        $withoutAngle.DateText | Should Be "26.04.08"
+        $withoutAngle.FilterName | Should Be "L"
+        $withoutAngle.AngleDegrees | Should Be $null
+    }
 }

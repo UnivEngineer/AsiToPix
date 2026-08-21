@@ -274,8 +274,291 @@ function Get-AsiToPixUniqueFlatPlan {
     }
 }
 
+function Get-AsiToPixFlatSelectionKey {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Camera,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Filter,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Target,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Setup,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$LightSession
+    )
+
+    $parts = @($Camera, $Filter, $Target, $Setup, $LightSession) | ForEach-Object {
+        ([string]$_).Trim().ToUpperInvariant()
+    }
+    return ($parts -join "|")
+}
+
+function Get-AsiToPixPreviousFlatSelectionPlan {
+    [CmdletBinding()]
+    [OutputType([object])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$CalibrationSource
+    )
+
+    $candidateByKey = @{}
+    $allKeys = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+
+    foreach ($source in $CalibrationSource) {
+        $type = [string](Get-AsiToPixProjectPlanPropertyValue -InputObject $source -Name "Type")
+        if ($type -ine "Flats") {
+            continue
+        }
+
+        $camera = [string](Get-AsiToPixProjectPlanPropertyValue -InputObject $source -Name "Camera")
+        $filter = [string](Get-AsiToPixProjectPlanPropertyValue -InputObject $source -Name "Filter")
+        $target = [string](Get-AsiToPixProjectPlanPropertyValue -InputObject $source -Name "Target")
+        $setup = [string](Get-AsiToPixProjectPlanPropertyValue -InputObject $source -Name "Setup")
+        $sourcePath = [string](Get-AsiToPixProjectPlanPropertyValue -InputObject $source -Name "SourcePath")
+        if ([string]::IsNullOrWhiteSpace($camera) -or
+            [string]::IsNullOrWhiteSpace($filter) -or
+            [string]::IsNullOrWhiteSpace($sourcePath)) {
+            continue
+        }
+
+        $lightSessions = @(
+            Get-AsiToPixProjectPlanPropertyValue -InputObject $source -Name "LightSessions" |
+                ForEach-Object { [string]$_ } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Sort-Object -Unique
+        )
+        foreach ($lightSession in $lightSessions) {
+            $key = Get-AsiToPixFlatSelectionKey `
+                -Camera $camera `
+                -Filter $filter `
+                -Target $target `
+                -Setup $setup `
+                -LightSession $lightSession
+            [void]$allKeys.Add($key)
+            if (-not $candidateByKey.ContainsKey($key)) {
+                $candidateByKey[$key] = [System.Collections.Generic.List[object]]::new()
+            }
+
+            $candidateByKey[$key].Add([PSCustomObject]@{
+                Key          = $key
+                Camera       = $camera
+                Filter       = $filter
+                Target       = $target
+                Setup        = $setup
+                LightSession = $lightSession
+                SourcePath   = $sourcePath
+                SourceMode   = [string](Get-AsiToPixProjectPlanPropertyValue -InputObject $source -Name "SourceMode")
+                FlatSetId    = [string](Get-AsiToPixProjectPlanPropertyValue -InputObject $source -Name "FlatSetId")
+            })
+        }
+    }
+
+    $selections = [System.Collections.Generic.List[object]]::new()
+    $conflicts = [System.Collections.Generic.List[object]]::new()
+    foreach ($key in @($candidateByKey.Keys | Sort-Object)) {
+        $candidateBySourcePath = [System.Collections.Generic.Dictionary[string, object]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+        )
+        foreach ($candidate in $candidateByKey[$key]) {
+            if (-not $candidateBySourcePath.ContainsKey($candidate.SourcePath)) {
+                $candidateBySourcePath.Add($candidate.SourcePath, $candidate)
+            }
+        }
+
+        if ($candidateBySourcePath.Count -eq 1) {
+            $selections.Add(@($candidateBySourcePath.Values)[0])
+        } else {
+            $conflicts.Add([PSCustomObject]@{
+                Key         = $key
+                SourcePaths = @($candidateBySourcePath.Keys | Sort-Object)
+            })
+        }
+    }
+
+    return [PSCustomObject]@{
+        Selections         = @($selections)
+        Conflicts          = @($conflicts)
+        SessionCount       = $allKeys.Count
+        FlatSelectionCount = $selections.Count
+    }
+}
+
+function Get-AsiToPixShuffledItem {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$InputObject,
+
+        [Parameter(Mandatory = $true)]
+        [System.Random]$Random
+    )
+
+    $items = @($InputObject)
+    for ($index = $items.Count - 1; $index -gt 0; $index--) {
+        $swapIndex = $Random.Next($index + 1)
+        $temporaryItem = $items[$index]
+        $items[$index] = $items[$swapIndex]
+        $items[$swapIndex] = $temporaryItem
+    }
+
+    return @($items)
+}
+
+function Select-AsiToPixPreviewLightPlan {
+    [CmdletBinding()]
+    [OutputType([object])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$PendingLink,
+
+        [ValidateRange(1, 1000)]
+        [int]$MaxFramesPerFilter = 15,
+
+        [int]$RandomSeed
+    )
+
+    $random = if ($PSBoundParameters.ContainsKey("RandomSeed")) {
+        [System.Random]::new($RandomSeed)
+    } else {
+        [System.Random]::new()
+    }
+    $lightGroups = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    $selectedFilesByIndex = @{}
+
+    for ($index = 0; $index -lt $PendingLink.Count; $index++) {
+        $link = $PendingLink[$index]
+        if ([string](Get-AsiToPixProjectPlanPropertyValue -InputObject $link -Name "Type") -ne "Lights") {
+            continue
+        }
+
+        $sourceFiles = @(
+            Get-AsiToPixProjectPlanPropertyValue -InputObject $link -Name "SourceFiles" |
+                ForEach-Object { [string]$_ } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Sort-Object -Unique
+        )
+        if ($sourceFiles.Count -eq 0) {
+            $tag = [string](Get-AsiToPixProjectPlanPropertyValue -InputObject $link -Name "Tag")
+            throw "Preview light link '$tag' does not contain any SourceFiles."
+        }
+
+        $camera = [string](Get-AsiToPixProjectPlanPropertyValue -InputObject $link -Name "Cam")
+        $filter = [string](Get-AsiToPixProjectPlanPropertyValue -InputObject $link -Name "Filter")
+        if ([string]::IsNullOrWhiteSpace($camera) -or [string]::IsNullOrWhiteSpace($filter)) {
+            $tag = [string](Get-AsiToPixProjectPlanPropertyValue -InputObject $link -Name "Tag")
+            throw "Preview light link '$tag' must contain Cam and Filter values."
+        }
+
+        $groupKey = "$($camera.ToUpperInvariant())|$($filter.ToUpperInvariant())"
+        if (-not $lightGroups.ContainsKey($groupKey)) {
+            $lightGroups.Add($groupKey, [System.Collections.Generic.List[object]]::new())
+        }
+
+        $lightGroups[$groupKey].Add([PSCustomObject]@{
+            Index         = $index
+            Link          = $link
+            Camera        = $camera
+            Filter        = $filter
+            SourceFiles   = @(Get-AsiToPixShuffledItem -InputObject $sourceFiles -Random $random)
+            SelectedFiles = [System.Collections.Generic.List[string]]::new()
+            Cursor        = 0
+        })
+    }
+
+    $groupSummaries = [System.Collections.Generic.List[object]]::new()
+    foreach ($groupKey in @($lightGroups.Keys | Sort-Object)) {
+        $sessions = @(Get-AsiToPixShuffledItem -InputObject @($lightGroups[$groupKey]) -Random $random)
+        $availableFrameCount = [int](($sessions | ForEach-Object { $_.SourceFiles.Count } | Measure-Object -Sum).Sum)
+        $targetFrameCount = [Math]::Min($MaxFramesPerFilter, $availableFrameCount)
+        $selectedFrameCount = 0
+
+        while ($selectedFrameCount -lt $targetFrameCount) {
+            $madeProgress = $false
+            foreach ($session in $sessions) {
+                if ($selectedFrameCount -ge $targetFrameCount) {
+                    break
+                }
+                if ($session.Cursor -ge $session.SourceFiles.Count) {
+                    continue
+                }
+
+                $session.SelectedFiles.Add([string]$session.SourceFiles[$session.Cursor])
+                $session.Cursor++
+                $selectedFrameCount++
+                $madeProgress = $true
+            }
+
+            if (-not $madeProgress) {
+                break
+            }
+        }
+
+        $selectedSessionCount = 0
+        foreach ($session in $sessions) {
+            $selectedFiles = @($session.SelectedFiles)
+            if ($selectedFiles.Count -eq 0) {
+                continue
+            }
+
+            $selectedSessionCount++
+            $selectedFilesByIndex[$session.Index] = $selectedFiles
+            $originalFrameCount = $session.SourceFiles.Count
+            $session.Link | Add-Member -NotePropertyName OriginalFrameCount -NotePropertyValue $originalFrameCount -Force
+            $session.Link | Add-Member -NotePropertyName SelectedFiles -NotePropertyValue $selectedFiles -Force
+            $session.Link | Add-Member -NotePropertyName FrameCount -NotePropertyValue $selectedFiles.Count -Force
+            $session.Link | Add-Member -NotePropertyName PreviewMode -NotePropertyValue $true -Force
+        }
+
+        $groupSummaries.Add([PSCustomObject]@{
+            Camera                = $sessions[0].Camera
+            Filter                = $sessions[0].Filter
+            AvailableFrameCount   = $availableFrameCount
+            SelectedFrameCount    = $selectedFrameCount
+            AvailableSessionCount = $sessions.Count
+            SelectedSessionCount  = $selectedSessionCount
+        })
+    }
+
+    $previewLinks = [System.Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt $PendingLink.Count; $index++) {
+        $link = $PendingLink[$index]
+        $type = [string](Get-AsiToPixProjectPlanPropertyValue -InputObject $link -Name "Type")
+        if ($type -ne "Lights" -or $selectedFilesByIndex.ContainsKey($index)) {
+            $previewLinks.Add($link)
+        }
+    }
+
+    return [PSCustomObject]@{
+        PendingLinks        = @($previewLinks)
+        Groups              = @($groupSummaries)
+        AvailableFrameCount = [int](($groupSummaries | Measure-Object -Property AvailableFrameCount -Sum).Sum)
+        SelectedFrameCount  = [int](($groupSummaries | Measure-Object -Property SelectedFrameCount -Sum).Sum)
+    }
+}
+
 Export-ModuleMember -Function `
     Get-AsiToPixFlatSetId, `
     Get-AsiToPixUniqueFlatPlan, `
+    Get-AsiToPixFlatSelectionKey, `
+    Get-AsiToPixPreviousFlatSelectionPlan, `
+    Select-AsiToPixPreviewLightPlan, `
     ConvertTo-AsiToPixFlatSetTag, `
     Resolve-AsiToPixCanonicalSourcePath

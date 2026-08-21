@@ -76,11 +76,31 @@ Describe "Import report" {
         ConvertTo-AsiToPixTsvExpression -Expression "" | Should Be ""
     }
 
+    It "indexes new and legacy ASIAir object folder names" {
+        $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "archive-name-formats\AstroPhoto"
+        $importPath = Join-Path -Path $astroPhotoRoot -ChildPath "Import"
+        $archivePath = Join-Path -Path $astroPhotoRoot -ChildPath "ASIAir"
+        New-Item -ItemType Directory -Path $importPath -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path -Path $archivePath -ChildPath "IC 2602 (Southern Pleiades cluster)") -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path -Path $archivePath -ChildPath "NGC 104 - 47 Tuc") -Force | Out-Null
+
+        $index = Get-AsiToPixArchiveObjectIndex -ImportRoot $importPath
+        $newFormat = @($index.Records | Where-Object { $_.FolderName -eq "IC 2602 (Southern Pleiades cluster)" })
+        $legacyFormat = @($index.Records | Where-Object { $_.FolderName -eq "NGC 104 - 47 Tuc" })
+
+        $newFormat.Count | Should Be 1
+        $newFormat[0].CatalogNumber | Should Be "IC 2602"
+        $newFormat[0].Name | Should Be "Southern Pleiades cluster"
+        $legacyFormat.Count | Should Be 1
+        $legacyFormat[0].CatalogNumber | Should Be "NGC 104"
+        $legacyFormat[0].Name | Should Be "47 Tuc"
+    }
+
     It "builds a tab-separated report from an Import tree" {
         $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "report-tree\AstroPhoto"
         $importPath = Join-Path -Path $astroPhotoRoot -ChildPath "Import"
         $objectPath = Join-Path -Path $importPath -ChildPath "APO120 @ 0.8x\Light\47 Tuc"
-        $archiveObjectPath = Join-Path -Path $astroPhotoRoot -ChildPath "ASIAir\NGC 104 - 47 Tuc"
+        $archiveObjectPath = Join-Path -Path $astroPhotoRoot -ChildPath "ASIAir\NGC 104 (47 Tuc)"
         New-Item -ItemType Directory -Path $objectPath -Force | Out-Null
         New-Item -ItemType Directory -Path $archiveObjectPath -Force | Out-Null
         @(

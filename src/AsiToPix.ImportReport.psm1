@@ -1,5 +1,8 @@
 Set-StrictMode -Version Latest
 
+$pathsModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.Paths.psm1"
+Import-Module $pathsModule -Force
+
 $importSessionModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.ImportSession.psm1"
 Import-Module $importSessionModule -Force
 
@@ -196,20 +199,15 @@ function Get-AsiToPixArchiveObjectIndex {
     }
 
     $records = foreach ($directory in Get-ChildItem -LiteralPath $archivePath -Directory -ErrorAction Stop) {
-        if ($directory.Name -notmatch '^(?<catalog>.+?)\s+-\s+(?<name>.+)$') {
-            continue
-        }
-
-        $catalogNumber = $Matches["catalog"].Trim()
-        $objectName = $Matches["name"].Trim()
-        if ([string]::IsNullOrWhiteSpace($catalogNumber) -or [string]::IsNullOrWhiteSpace($objectName)) {
+        $archiveObject = ConvertFrom-AsiToPixArchiveObjectFolderName -FolderName $directory.Name
+        if ($null -eq $archiveObject) {
             continue
         }
 
         [PSCustomObject]@{
             FolderName    = $directory.Name
-            CatalogNumber = $catalogNumber
-            Name          = $objectName
+            CatalogNumber = $archiveObject.CatalogNumber
+            Name          = $archiveObject.Name
         }
     }
 
@@ -269,15 +267,7 @@ function Resolve-AsiToPixTsvObjectName {
 }
 
 function Get-AsiToPixImportRoot {
-    $roots = foreach ($drive in Get-PSDrive -PSProvider FileSystem) {
-        $astroPhotoPath = Join-Path -Path $drive.Root -ChildPath "AstroPhoto"
-        $importPath = Join-Path -Path $astroPhotoPath -ChildPath "Import"
-        if (Test-Path -LiteralPath $importPath -PathType Container -ErrorAction SilentlyContinue) {
-            (Resolve-Path -LiteralPath $importPath -ErrorAction Stop).ProviderPath
-        }
-    }
-
-    return @($roots | Sort-Object -Unique)
+    return @(Get-AsiToPixAstroRootChildCandidate -ChildPath "Import")
 }
 
 function Get-AsiToPixImportReport {

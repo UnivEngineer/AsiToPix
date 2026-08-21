@@ -160,6 +160,140 @@ Describe "ImportSession parsing" {
         @($plan.ParsedFiles | Select-Object -ExpandProperty DestinationNightFolder -Unique) | Should Be @("26.07.10")
     }
 
+    It "checks each destination filter and night directory only once per import plan" {
+        InModuleScope AsiToPix.ImportSession {
+            $destinationRoot = "C:\AsiToPixTest\ASIAir\Helix\2026\APO120 @ ASI2600"
+            $plan = [PSCustomObject]@{
+                AsiairRoot  = "C:\AsiToPixTest\ASIAir"
+                ObjectPath  = "C:\AsiToPixTest\ASIAir\Helix"
+                SeasonPath  = "C:\AsiToPixTest\ASIAir\Helix\2026"
+                SetupPath   = $destinationRoot
+                GoodRoot    = Join-Path -Path $destinationRoot -ChildPath "Good"
+                TrashRoot   = Join-Path -Path $destinationRoot -ChildPath "Trash"
+                ImportMode  = "Copy"
+                SourcePath  = "C:\Import\Helix"
+                ParsedFiles = @(
+                    [PSCustomObject]@{
+                        File                   = [PSCustomObject]@{ Name = "first.fit"; FullName = "C:\Import\Helix\first.fit" }
+                        FilterName             = "O"
+                        DestinationNightFolder = "26.07.10"
+                    },
+                    [PSCustomObject]@{
+                        File                   = [PSCustomObject]@{ Name = "second.fit"; FullName = "C:\Import\Helix\second.fit" }
+                        FilterName             = "O"
+                        DestinationNightFolder = "26.07.10"
+                    }
+                )
+            }
+
+            Mock New-AsiToPixDirectory {}
+            Mock Copy-Item {}
+            Mock Write-Host {}
+
+            $result = Invoke-AsiToPixImportPlan -Plan $plan
+
+            $result.Imported | Should Be 2
+            Assert-MockCalled Copy-Item -Times 2 -Exactly
+            Assert-MockCalled New-AsiToPixDirectory -Times 10 -Exactly
+            Assert-MockCalled New-AsiToPixDirectory -Times 1 -Exactly -ParameterFilter {
+                $Path -eq (Join-Path -Path $plan.GoodRoot -ChildPath "O\26.07.10")
+            }
+            Assert-MockCalled New-AsiToPixDirectory -Times 1 -Exactly -ParameterFilter {
+                $Path -eq (Join-Path -Path $plan.TrashRoot -ChildPath "O\26.07.10")
+            }
+        }
+    }
+
+    It "recognizes matching UNC shares as a fast NAS copy location" {
+        InModuleScope AsiToPix.ImportSession {
+            Get-AsiToPixNetworkLocationKey -Path '\\NAS\AstroPhoto\Import\M 31\first.fit' |
+                Should Be '\\nas\astrophoto'
+            Get-AsiToPixNetworkLocationKey -Path 'C:\AstroPhoto\Import\M 31\first.fit' |
+                Should Be ""
+
+            $matchingItems = @(
+                [PSCustomObject]@{
+                    Entry = [PSCustomObject]@{
+                        File = [PSCustomObject]@{
+                            Name     = "first.fit"
+                            FullName = '\\NAS\AstroPhoto\Import\M 31\first.fit'
+                        }
+                    }
+                }
+            )
+
+            Test-AsiToPixUseRobocopy `
+                -WorkItem $matchingItems `
+                -DestinationRoot '\\nas\AstroPhoto\ASIAir\M 31\2026\Setup' |
+                Should Be $true
+            Test-AsiToPixUseRobocopy `
+                -WorkItem $matchingItems `
+                -DestinationRoot '\\nas\OtherShare\ASIAir\M 31\2026\Setup' |
+                Should Be $false
+        }
+    }
+
+    It "copies a Robocopy batch through staging without modifying source files" {
+        $sourcePath = Join-Path -Path $TestDrive -ChildPath "robocopy-source"
+        $setupPath = Join-Path -Path $TestDrive -ChildPath "robocopy-target"
+        $firstDestinationFolder = Join-Path -Path $setupPath -ChildPath "Good\L\26.07.10"
+        $secondDestinationFolder = Join-Path -Path $setupPath -ChildPath "Good\O\26.07.10"
+        New-Item -ItemType Directory -Path $sourcePath -Force | Out-Null
+        New-Item -ItemType Directory -Path $firstDestinationFolder -Force | Out-Null
+        New-Item -ItemType Directory -Path $secondDestinationFolder -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path -Path $sourcePath -ChildPath "first.fit") -Value "first frame" -Encoding ASCII
+        Set-Content -LiteralPath (Join-Path -Path $sourcePath -ChildPath "second.fit") -Value "second frame" -Encoding ASCII
+        $env:ASITOPIX_ROBOCOPY_SOURCE = $sourcePath
+        $env:ASITOPIX_ROBOCOPY_SETUP = $setupPath
+        $env:ASITOPIX_ROBOCOPY_FIRST_DESTINATION = Join-Path -Path $firstDestinationFolder -ChildPath "first.fit"
+        $env:ASITOPIX_ROBOCOPY_SECOND_DESTINATION = Join-Path -Path $secondDestinationFolder -ChildPath "second.fit"
+
+        InModuleScope AsiToPix.ImportSession {
+            $firstFile = Get-Item -LiteralPath (Join-Path -Path $env:ASITOPIX_ROBOCOPY_SOURCE -ChildPath "first.fit")
+            $secondFile = Get-Item -LiteralPath (Join-Path -Path $env:ASITOPIX_ROBOCOPY_SOURCE -ChildPath "second.fit")
+            $workItems = @(
+                [PSCustomObject]@{
+                    Entry = [PSCustomObject]@{
+                        File       = $firstFile
+                        FilterName = "L"
+                    }
+                    SourceDirectory        = $env:ASITOPIX_ROBOCOPY_SOURCE
+                    DestinationFile        = $env:ASITOPIX_ROBOCOPY_FIRST_DESTINATION
+                    DestinationNightFolder = "26.07.10"
+                },
+                [PSCustomObject]@{
+                    Entry = [PSCustomObject]@{
+                        File       = $secondFile
+                        FilterName = "O"
+                    }
+                    SourceDirectory        = $env:ASITOPIX_ROBOCOPY_SOURCE
+                    DestinationFile        = $env:ASITOPIX_ROBOCOPY_SECOND_DESTINATION
+                    DestinationNightFolder = "26.07.10"
+                }
+            )
+
+            $completed = @(
+                Invoke-AsiToPixRobocopyImport `
+                    -WorkItem $workItems `
+                    -SetupPath $env:ASITOPIX_ROBOCOPY_SETUP `
+                    -ThreadCount 2
+            )
+
+            $completed.Count | Should Be 2
+            Test-Path -LiteralPath $firstFile.FullName -PathType Leaf | Should Be $true
+            Test-Path -LiteralPath $secondFile.FullName -PathType Leaf | Should Be $true
+            (Get-Item -LiteralPath $env:ASITOPIX_ROBOCOPY_FIRST_DESTINATION).Length | Should Be $firstFile.Length
+            (Get-Item -LiteralPath $env:ASITOPIX_ROBOCOPY_SECOND_DESTINATION).Length | Should Be $secondFile.Length
+            @(Get-ChildItem -LiteralPath $env:ASITOPIX_ROBOCOPY_SETUP -Filter ".asitopix-import-*").Count |
+                Should Be 0
+        }
+
+        Remove-Item Env:\ASITOPIX_ROBOCOPY_SOURCE
+        Remove-Item Env:\ASITOPIX_ROBOCOPY_SETUP
+        Remove-Item Env:\ASITOPIX_ROBOCOPY_FIRST_DESTINATION
+        Remove-Item Env:\ASITOPIX_ROBOCOPY_SECOND_DESTINATION
+    }
+
     It "finds import sessions grouped by setup and object folders" {
         $importRoot = Join-Path -Path $TestDrive -ChildPath "batch-import"
         $objectFolder = Join-Path -Path $importRoot -ChildPath "APO120 @ 0.8x\Lights\M 16"
@@ -185,6 +319,43 @@ Describe "ImportSession parsing" {
 
         $resolved.SourcePath | Should Be $objectFolder
         $resolved.AstroPhotoRoot | Should Be $astroPhotoRoot
+    }
+
+    It "prompts again after an interactive object-name typo" {
+        $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "object-typo-root\AstroPhoto"
+        $objectFolder = Join-Path -Path $astroPhotoRoot -ChildPath "Import\Canon EF 200\Light\Butterfly"
+        New-Item -ItemType Directory -Path $objectFolder -Force | Out-Null
+        New-Item -ItemType File -Path (Join-Path -Path $objectFolder -ChildPath "A7406786.ARW") | Out-Null
+        $env:ASITOPIX_TYPO_ASTRO_ROOT = $astroPhotoRoot
+        $env:ASITOPIX_TYPO_OBJECT_FOLDER = $objectFolder
+
+        InModuleScope AsiToPix.ImportSession {
+            Mock Read-Host { "Butterfly" }
+            Mock Write-Host {}
+
+            $resolved = Read-AsiToPixImportSource `
+                -InitialValue "betterfly" `
+                -AstroPhotoRoot $env:ASITOPIX_TYPO_ASTRO_ROOT
+
+            $resolved.SourcePath | Should Be $env:ASITOPIX_TYPO_OBJECT_FOLDER
+            Assert-MockCalled Read-Host -Times 1 -Exactly
+            Assert-MockCalled Write-Host -Times 1 -Exactly -ParameterFilter {
+                $Object -match "^\[!\] No import object folder matching 'betterfly'" -and
+                    $ForegroundColor -eq "Red"
+            }
+        }
+
+        Remove-Item Env:\ASITOPIX_TYPO_ASTRO_ROOT
+        Remove-Item Env:\ASITOPIX_TYPO_OBJECT_FOLDER
+    }
+
+    It "uses retry handling only for interactively prompted source input" {
+        $entryScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "..\ImportSession.ps1"
+        $entryScriptText = Get-Content -LiteralPath $entryScriptPath -Raw
+
+        $entryScriptText | Should Match '\$sourcePathWasProvided = -not \[string\]::IsNullOrWhiteSpace\(\$SourcePath\)'
+        $entryScriptText | Should Match 'Read-AsiToPixImportSource -InitialValue \$SourcePath'
+        $entryScriptText | Should Match 'Resolve-AsiToPixImportSourcePath -SourcePath \$SourcePath'
     }
 
     It "lets the user choose between multiple matching import sessions" {
@@ -390,4 +561,165 @@ Describe "ImportSession parsing" {
         $plan.ParsedFiles[0].CapturedAt | Should Be ([datetime]"2026-07-18T01:17:58")
         $plan.ParsedFiles[0].NightDate | Should Be "26.07.17"
     }
+
+    It "reads files only from object folders matching an object-name search" {
+        $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "filtered-object-search\AstroPhoto"
+        $targetFolder = Join-Path -Path $astroPhotoRoot -ChildPath "Import\Canon EF 200\Light\Butterfly"
+        $unrelatedFolder = Join-Path -Path $astroPhotoRoot -ChildPath "Import\APO120 @ 0.8x\Light\Andromeda"
+        New-Item -ItemType Directory -Path $targetFolder -Force | Out-Null
+        New-Item -ItemType Directory -Path $unrelatedFolder -Force | Out-Null
+        $env:ASITOPIX_FILTERED_SEARCH_ROOT = $astroPhotoRoot
+        $env:ASITOPIX_FILTERED_TARGET = $targetFolder
+        $env:ASITOPIX_FILTERED_UNRELATED = $unrelatedFolder
+
+        InModuleScope AsiToPix.ImportSession {
+            Mock Get-AsiToPixSourceLightFile {
+                [PSCustomObject]@{ Name = "A7406786.ARW" }
+            }
+
+            $resolved = Resolve-AsiToPixImportSourcePath `
+                -SourcePath "Butterfly" `
+                -AstroPhotoRoot $env:ASITOPIX_FILTERED_SEARCH_ROOT
+
+            $resolved.SourcePath | Should Be $env:ASITOPIX_FILTERED_TARGET
+            Assert-MockCalled Get-AsiToPixSourceLightFile -Times 1 -Exactly -ParameterFilter {
+                $SourcePath -eq $env:ASITOPIX_FILTERED_TARGET
+            }
+            Assert-MockCalled Get-AsiToPixSourceLightFile -Times 0 -Exactly -ParameterFilter {
+                $SourcePath -eq $env:ASITOPIX_FILTERED_UNRELATED
+            }
+        }
+
+        Remove-Item Env:\ASITOPIX_FILTERED_SEARCH_ROOT
+        Remove-Item Env:\ASITOPIX_FILTERED_TARGET
+        Remove-Item Env:\ASITOPIX_FILTERED_UNRELATED
+    }
+
+    It "keeps Robocopy progress in one banner without persistent batch lines" {
+        $sourcePath = Join-Path -Path $TestDrive -ChildPath "robocopy-progress-source"
+        $setupPath = Join-Path -Path $TestDrive -ChildPath "robocopy-progress-target"
+        $destinationFolder = Join-Path -Path $setupPath -ChildPath "Good\L\26.07.10"
+        New-Item -ItemType Directory -Path $sourcePath -Force | Out-Null
+        New-Item -ItemType Directory -Path $destinationFolder -Force | Out-Null
+        1..17 | ForEach-Object {
+            Set-Content `
+                -LiteralPath (Join-Path -Path $sourcePath -ChildPath ("frame-{0:00}.fit" -f $_)) `
+                -Value ("frame {0}" -f $_) `
+                -Encoding ASCII
+        }
+        $env:ASITOPIX_PROGRESS_SOURCE = $sourcePath
+        $env:ASITOPIX_PROGRESS_SETUP = $setupPath
+        $env:ASITOPIX_PROGRESS_DESTINATION = $destinationFolder
+
+        InModuleScope AsiToPix.ImportSession {
+            $workItems = foreach ($sourceFile in Get-ChildItem -LiteralPath $env:ASITOPIX_PROGRESS_SOURCE -File) {
+                [PSCustomObject]@{
+                    Entry = [PSCustomObject]@{
+                        File       = $sourceFile
+                        FilterName = "L"
+                    }
+                    SourceDirectory        = $env:ASITOPIX_PROGRESS_SOURCE
+                    DestinationFile        = Join-Path -Path $env:ASITOPIX_PROGRESS_DESTINATION -ChildPath $sourceFile.Name
+                    DestinationNightFolder = "26.07.10"
+                }
+            }
+
+            Mock Invoke-AsiToPixRobocopyBatch {
+                foreach ($name in $FileName) {
+                    [System.IO.File]::Copy(
+                        (Join-Path -Path $SourceDirectory -ChildPath $name),
+                        (Join-Path -Path $DestinationDirectory -ChildPath $name)
+                    )
+                }
+            }
+            Mock Write-Host {}
+            Mock Write-Progress {}
+
+            $completed = @(
+                Invoke-AsiToPixRobocopyImport `
+                    -WorkItem @($workItems) `
+                    -SetupPath $env:ASITOPIX_PROGRESS_SETUP `
+                    -ThreadCount 4
+            )
+
+            $completed.Count | Should Be 17
+            Assert-MockCalled Invoke-AsiToPixRobocopyBatch -Times 2 -Exactly
+            Assert-MockCalled Write-Host -Times 0 -Exactly -ParameterFilter {
+                $Object -match '^\s+\[copy\]'
+            }
+            Assert-MockCalled Write-Progress -Times 3 -Exactly -ParameterFilter {
+                $Activity -eq "Copying lights from NAS"
+            }
+            Assert-MockCalled Write-Progress -Times 2 -Exactly -ParameterFilter {
+                $Status -match '^\d+/17 files \(\d+%\), \d+([,.]\d+)? MB/s avg, elapsed \d{2}:\d{2}:\d{2} \(Robocopy /MT:4\)$'
+            }
+        }
+
+        Remove-Item Env:\ASITOPIX_PROGRESS_SOURCE
+        Remove-Item Env:\ASITOPIX_PROGRESS_SETUP
+        Remove-Item Env:\ASITOPIX_PROGRESS_DESTINATION
+    }
+
+    It "selects the fast copy engine for a same-share NAS import plan" {
+        InModuleScope AsiToPix.ImportSession {
+            $destinationRoot = '\\NAS\AstroPhoto\ASIAir\Helix\2026\APO120 @ ASI2600'
+            $plan = [PSCustomObject]@{
+                AsiairRoot  = '\\NAS\AstroPhoto\ASIAir'
+                ObjectPath  = '\\NAS\AstroPhoto\ASIAir\Helix'
+                SeasonPath  = '\\NAS\AstroPhoto\ASIAir\Helix\2026'
+                SetupPath   = $destinationRoot
+                GoodRoot    = Join-Path -Path $destinationRoot -ChildPath "Good"
+                TrashRoot   = Join-Path -Path $destinationRoot -ChildPath "Trash"
+                ImportMode  = "Copy"
+                SourcePath  = '\\NAS\AstroPhoto\Import\Helix'
+                ParsedFiles = @(
+                    [PSCustomObject]@{
+                        File = [PSCustomObject]@{
+                            Name     = "first.fit"
+                            FullName = '\\NAS\AstroPhoto\Import\Helix\first.fit'
+                            Length   = 42
+                        }
+                        FilterName             = "O"
+                        DestinationNightFolder = "26.07.10"
+                    }
+                )
+            }
+
+            Mock New-AsiToPixDirectory {}
+            Mock Test-Path { $false }
+            Mock Test-AsiToPixUseRobocopy { $true }
+            Mock Invoke-AsiToPixRobocopyImport { @($WorkItem) }
+            Mock Copy-Item {}
+            Mock Write-Host {}
+
+            $result = Invoke-AsiToPixImportPlan -Plan $plan
+
+            $result.Imported | Should Be 1
+            $result.CopyEngine | Should Be "Robocopy"
+            Assert-MockCalled Test-AsiToPixUseRobocopy -Times 1 -Exactly
+            Assert-MockCalled Invoke-AsiToPixRobocopyImport -Times 1 -Exactly -ParameterFilter {
+                $SetupPath -eq $plan.SetupPath -and $ThreadCount -eq 4
+            }
+            Assert-MockCalled Copy-Item -Times 0 -Exactly -ParameterFilter {
+                $Destination -like '\\NAS\AstroPhoto\*'
+            }
+        }
+    }
+
+    It "recognizes a mapped network drive as its backing UNC share" {
+        InModuleScope AsiToPix.ImportSession {
+            Mock Get-PSDrive {
+                [PSCustomObject]@{
+                    DisplayRoot = '\\NAS\AstroPhoto'
+                }
+            }
+
+            Get-AsiToPixNetworkLocationKey -Path 'Z:\AstroPhoto\Import\M 31\first.fit' |
+                Should Be '\\nas\astrophoto'
+            Assert-MockCalled Get-PSDrive -Times 1 -Exactly -ParameterFilter {
+                $Name -eq "Z" -and $PSProvider -eq "FileSystem"
+            }
+        }
+    }
+
 }

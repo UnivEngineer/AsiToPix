@@ -94,9 +94,41 @@ function Get-AsiToPixFrameFolderRegex {
     return "(?i:$($escapedAliases -join '|'))"
 }
 
+function Get-AsiToPixFlatFolderInfo {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Name
+    )
+
+    $dateText = $null
+    $filterName = $null
+    if ($Name.Length -ge 8) {
+        $dateText = $Name.Substring(0, 8)
+        $remainder = $Name.Substring(8).TrimStart()
+        if ($remainder -match '^(?:filt)?(?<filter>[^ _]+)') {
+            $filterName = $Matches["filter"]
+        }
+    }
+
+    $angleDegrees = $null
+    if ($Name -match '(?i)(?:^|\s)(?<angle>\d{1,3})deg(?=\s|$)') {
+        $angleDegrees = $Matches["angle"]
+    }
+
+    return [PSCustomObject]@{
+        DateText     = $dateText
+        FilterName   = $filterName
+        AngleDegrees = $angleDegrees
+    }
+}
+
 Export-ModuleMember -Function `
     Get-AsiToPixCanonicalFrameFolderName, `
     Get-AsiToPixChildFrameFolder, `
+    Get-AsiToPixFlatFolderInfo, `
     Get-AsiToPixFrameFolderAlias, `
     Get-AsiToPixFrameFolderRegex, `
     Test-AsiToPixFrameFolderName

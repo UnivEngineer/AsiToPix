@@ -44,10 +44,15 @@ $metadataPathParameters = @{
 }
 if (-not $metadataInputExists -and -not $metadataInputLooksLikePath) {
     if ([string]::IsNullOrWhiteSpace($AstroPhotoRoot)) {
-        $AstroPhotoRoot = Resolve-AstroPhotoRoot
+        $processingRoots = @(Get-AsiToPixAstroRootChildCandidate -ChildPath "Processing")
+        if ($processingRoots.Count -eq 0) {
+            throw "No Processing folders were found under *:\AstroPhoto or *:\Astro."
+        }
+    } else {
+        $processingRoots = @(Join-Path -Path $AstroPhotoRoot -ChildPath "Processing")
     }
 
-    $metadataPathParameters.ProcessingRoot = Join-Path -Path $AstroPhotoRoot -ChildPath "Processing"
+    $metadataPathParameters.ProcessingRoot = $processingRoots
 }
 
 $MetaPath = Resolve-AsiToPixProjectMetadataPath @metadataPathParameters

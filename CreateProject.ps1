@@ -1,6 +1,12 @@
 ﻿# Run as Admin for Symlinks
 [CmdletBinding(SupportsShouldProcess = $true)]
-param()
+param(
+    [Alias("SourceRoot")]
+    [string]$SourceAstroPhotoRoot = "",
+
+    [Alias("DestinationRoot")]
+    [string]$DestinationAstroPhotoRoot = ""
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -58,6 +64,33 @@ function Resolve-CreateProjectFullPath {
     }
 
     return [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path))
+}
+
+function Resolve-CreateProjectAstroRoot {
+    param(
+        [AllowEmptyString()]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Purpose,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SelectionPrompt
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return (Resolve-AstroPhotoRoot `
+            -Purpose $Purpose `
+            -SelectionPrompt $SelectionPrompt `
+            -AlwaysPrompt)
+    }
+
+    $trimmedPath = $Path.Trim().Trim('"')
+    if (-not (Test-Path -LiteralPath $trimmedPath -PathType Container)) {
+        throw "Astrophotography root for $Purpose not found: '$trimmedPath'."
+    }
+
+    return (Resolve-Path -LiteralPath $trimmedPath -ErrorAction Stop).ProviderPath
 }
 
 function Resolve-CreateProjectPath {
@@ -416,6 +449,27 @@ function Remove-CreateProjectSourceDirectory {
     }
 }
 
+function ConvertTo-CreateProjectExtendedPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if ($Path.StartsWith('\\?\', [System.StringComparison]::Ordinal)) {
+        return $Path
+    }
+
+    if ($Path.StartsWith('\\', [System.StringComparison]::Ordinal)) {
+        return '\\?\UNC\' + $Path.Substring(2)
+    }
+
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return '\\?\' + $Path
+    }
+
+    return $Path
+}
+
 function New-CreateProjectSymbolicLink {
     param(
         [Parameter(Mandatory = $true)]
@@ -442,10 +496,14 @@ function New-CreateProjectSymbolicLink {
     $parentPath = Split-Path -Path $Path -Parent
     New-CreateProjectDirectory -Path $parentPath
     if ($script:PSCmdlet.ShouldProcess($Path, "Create symbolic link to '$Target'")) {
+        $creationPath = ConvertTo-CreateProjectExtendedPath -Path $Path
+        $creationTarget = ConvertTo-CreateProjectExtendedPath -Path $Target
         try {
-            New-Item -ItemType SymbolicLink -Path $Path -Value $Target -ErrorAction Stop | Out-Null
+            New-Item -ItemType SymbolicLink -Path $creationPath -Value $creationTarget -ErrorAction Stop | Out-Null
         } catch [System.UnauthorizedAccessException] {
-            throw "Cannot create symbolic link: $Path. Windows requires Administrator rights or Developer Mode for symlink creation. Init.cmd enables symlink evaluation only; it does not grant symlink creation rights."
+            throw "Cannot create symbolic link: $Path. Windows requires Administrator rights or Developer Mode for symlink creation. Init.cmd enables symlink evaluation only; it does not grant symlink creation rights. Target: $Target"
+        } catch {
+            throw "Cannot create symbolic link.`nLink ($($Path.Length) chars): $Path`nTarget ($($Target.Length) chars): $Target`nWindows error: $($_.Exception.Message)"
         }
     }
 }
@@ -519,14 +577,118 @@ function Copy-CreateProjectDirectory {
     }
 }
 
+function Test-CreateProjectPreviewLightLink {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Link
+    )
+
+    return $Link.Type -eq "Lights" -and $null -ne $Link.PSObject.Properties["SelectedFiles"]
+}
+
+function Get-CreateProjectPreviewSourceFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Link
+    )
+
+    $selectedFilesProperty = $Link.PSObject.Properties["SelectedFiles"]
+    if ($null -eq $selectedFilesProperty) {
+        return @()
+    }
+
+    return @($selectedFilesProperty.Value)
+}
+
+function New-CreateProjectPreviewSymbolicLinkSet {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Destination,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$SourceFile
+    )
+
+    if (Test-Path -LiteralPath $Destination) {
+        $destinationItem = Get-Item -LiteralPath $Destination -Force -ErrorAction Stop
+        if (-not $destinationItem.PSIsContainer -or -not [string]::IsNullOrWhiteSpace([string]$destinationItem.LinkType)) {
+            throw "Cannot create preview file links because the destination is not an ordinary directory: $Destination"
+        }
+    } else {
+        New-CreateProjectDirectory -Path $Destination
+    }
+
+    foreach ($sourcePath in $SourceFile) {
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+            throw "Preview source file not found: $sourcePath"
+        }
+
+        $targetPath = Join-Path -Path $Destination -ChildPath (Split-Path -Path $sourcePath -Leaf)
+        New-CreateProjectSymbolicLink -Path $targetPath -Target $sourcePath
+    }
+}
+
+function Copy-CreateProjectFileSet {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$SourceFile,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Destination
+    )
+
+    if (Test-Path -LiteralPath $Destination) {
+        $destinationItem = Get-Item -LiteralPath $Destination -Force -ErrorAction Stop
+        if (-not $destinationItem.PSIsContainer -or -not [string]::IsNullOrWhiteSpace([string]$destinationItem.LinkType)) {
+            throw "Cannot copy preview files because the destination is not an ordinary directory: $Destination"
+        }
+    } else {
+        New-CreateProjectDirectory -Path $Destination
+    }
+
+    foreach ($sourcePath in $SourceFile) {
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+            throw "Preview source file not found: $sourcePath"
+        }
+
+        $targetPath = Join-Path -Path $Destination -ChildPath (Split-Path -Path $sourcePath -Leaf)
+        if (Test-Path -LiteralPath $targetPath) {
+            throw "Cannot copy preview file because the destination already exists: $targetPath"
+        }
+
+        if ($script:PSCmdlet.ShouldProcess($targetPath, "Copy preview file from '$sourcePath'")) {
+            $copySourcePath = ConvertTo-CreateProjectExtendedPath -Path $sourcePath
+            $copyTargetPath = ConvertTo-CreateProjectExtendedPath -Path $targetPath
+            Copy-Item -LiteralPath $copySourcePath -Destination $copyTargetPath -ErrorAction Stop
+        }
+    }
+}
+
 Write-Host "--- ASIAir SMART SCANNER v29 ---" -ForegroundColor Cyan
 
-$baseZ = Resolve-AstroPhotoRoot
-Write-AsiToPixCyrillicPathWarning -Path $baseZ -Context "AstroPhoto root"
+Write-Host "`n[INFO] CreateProject uses two independent roots:" -ForegroundColor Cyan
+Write-Host "  Source      (read) : ASIAir lights and Calibration library" -ForegroundColor White
+Write-Host "  Destination (write): Processing project, Source links, Pix, and metadata" -ForegroundColor White
+
+$sourceAstroPhotoRoot = Resolve-CreateProjectAstroRoot `
+    -Path $SourceAstroPhotoRoot `
+    -Purpose "CreateProject source (read ASIAir and Calibration)" `
+    -SelectionPrompt "Select SOURCE root folder (ASIAir and Calibration)"
+$destinationAstroPhotoRoot = Resolve-CreateProjectAstroRoot `
+    -Path $DestinationAstroPhotoRoot `
+    -Purpose "CreateProject destination (write Processing)" `
+    -SelectionPrompt "Select DESTINATION folder (Processing/project)"
+Write-AsiToPixCyrillicPathWarning -Path $sourceAstroPhotoRoot -Context "source AstroPhoto root"
+Write-AsiToPixCyrillicPathWarning -Path $destinationAstroPhotoRoot -Context "destination AstroPhoto root"
+Write-Host "[INFO] Source root      (read) : $sourceAstroPhotoRoot" -ForegroundColor DarkGray
+Write-Host "[INFO] Destination root (write): $destinationAstroPhotoRoot" -ForegroundColor DarkGray
 
 # 1. AUTO-DETECT
+Write-Host ""
 $inputPath = (Read-Host "Paste lights path, supported image file, or ASIAir object name").Trim('"')
-$inputPath = Resolve-CreateProjectInputPath -InputPath $inputPath -AstroPhotoRoot $baseZ
+$inputPath = Resolve-CreateProjectInputPath -InputPath $inputPath -AstroPhotoRoot $sourceAstroPhotoRoot
 Write-AsiToPixCyrillicPathWarning -Path $inputPath -Context "input path"
 
 # Parse the path for project metadata
@@ -572,7 +734,7 @@ $camShort = $parsedCamShort
 $safeObj = $astroObj.Replace(" ", "_");
 
 # Project Path confirmation
-$processingRoot = Join-Path -Path $baseZ -ChildPath "Processing"
+$processingRoot = Join-Path -Path $destinationAstroPhotoRoot -ChildPath "Processing"
 $defaultProjectMatch = Resolve-CreateProjectDefaultProjectPath `
     -DetectedObjectName $astroObj `
     -ProcessingRoot $processingRoot `
@@ -606,7 +768,12 @@ foreach ($p in @($sourcePath, $pixPath)) {
 Write-Host ""
 $mergeFilters = Read-CreateProjectConfirmation -Prompt "Allow WBPP to merge OSC sessions with filters IRC and Trib into a single one L?"
 
-$asiairRoot = Join-Path -Path $baseZ -ChildPath "ASIAir"
+Write-Host ""
+$previewMode = Read-CreateProjectConfirmation `
+    -Prompt "Use preview mode (10-15 frames per filter)?" `
+    -DefaultYes $false
+
+$asiairRoot = Join-Path -Path $sourceAstroPhotoRoot -ChildPath "ASIAir"
 $objectRoot = Join-Path -Path $asiairRoot -ChildPath $astroObj
 $seasonRoot = Join-Path -Path $objectRoot -ChildPath $season
 $setupSourceRoot = Join-Path -Path $seasonRoot -ChildPath "$telSetup @ $camShort"
@@ -1185,6 +1352,56 @@ function AngleDiff180($a, $b) {
     return $diff
 }
 
+$reusePreviousFlatSelection = $false
+$previousFlatSelectionByKey = @{}
+$previousMetaPath = Join-Path -Path $setupRoot -ChildPath "project_meta.json"
+if (Test-Path -LiteralPath $previousMetaPath -PathType Leaf) {
+    try {
+        $previousMetadata = Get-Content -LiteralPath $previousMetaPath -Raw -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        $calibrationSourcesProperty = $previousMetadata.PSObject.Properties["CalibrationSources"]
+        if ($null -ne $calibrationSourcesProperty) {
+            $previousFlatSelectionPlan = Get-AsiToPixPreviousFlatSelectionPlan `
+                -CalibrationSource @($calibrationSourcesProperty.Value)
+            if ($previousFlatSelectionPlan.SessionCount -gt 0) {
+                $sessionNoun = if ($previousFlatSelectionPlan.SessionCount -eq 1) { "session" } else { "sessions" }
+                $sessionVerb = if ($previousFlatSelectionPlan.SessionCount -eq 1) { "has" } else { "have" }
+                $flatNoun = if ($previousFlatSelectionPlan.FlatSelectionCount -eq 1) { "flat" } else { "flats" }
+                Write-Host (
+                    "`nPrevious run detected: {0} {1} {2} {3} {4} selected" -f `
+                        $previousFlatSelectionPlan.SessionCount,
+                        $sessionNoun,
+                        $sessionVerb,
+                        $previousFlatSelectionPlan.FlatSelectionCount,
+                        $flatNoun
+                ) -ForegroundColor Cyan
+
+                if ($previousFlatSelectionPlan.Conflicts.Count -gt 0) {
+                    Write-Host (
+                        "[!] {0} previous flat selection(s) are ambiguous and will be requested again." -f `
+                            $previousFlatSelectionPlan.Conflicts.Count
+                    ) -ForegroundColor Yellow
+                }
+
+                if ($previousFlatSelectionPlan.FlatSelectionCount -gt 0) {
+                    $reusePreviousFlatSelection = Read-CreateProjectConfirmation `
+                        -Prompt "Reuse flat selection from the previous run?" `
+                        -DefaultYes $true
+                    if ($reusePreviousFlatSelection) {
+                        foreach ($selection in $previousFlatSelectionPlan.Selections) {
+                            $previousFlatSelectionByKey[$selection.Key] = $selection
+                        }
+                    }
+                }
+            }
+        }
+    } catch {
+        Write-Host (
+            "`n[!] Cannot reuse flat selections from '$previousMetaPath': $($_.Exception.Message)"
+        ) -ForegroundColor Yellow
+    }
+}
+
 # SCANNER - iterates filter-group folders (L, RGB, Ha...) then date sub-folders
 foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAction Stop)) {
     foreach ($dFolder in (Get-ChildItem -LiteralPath $fFolder.FullName -Directory -ErrorAction Stop)) {
@@ -1229,7 +1446,7 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
             if ($sessionCamFull -notmatch '^ASI') { $sessionCamFull = "ASI$sessionCamFull" }
         }
         $sessionCamType  = if ($sessionCamFull -match "MM") { "Mono" } else { "OSC" }
-        $sessionCalibRoot = Join-Path -Path $baseZ -ChildPath "Calibration"
+        $sessionCalibRoot = Join-Path -Path $sourceAstroPhotoRoot -ChildPath "Calibration"
         $sessionCalibBase = Join-Path -Path $sessionCalibRoot -ChildPath $sessionCamFull
         $camInFile = $sessionCamFull -replace '^ASI',''
 
@@ -1296,11 +1513,45 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
             Session     = $sessionDate
             Target      = $targetGrp
             FrameCount  = $imageFiles.Count
+            SourceFiles = @($imageFiles | Select-Object -ExpandProperty FullName)
             FlatSetId   = $flatSetId
         }
         $pendingLinks += $lightPendingLink
 
         # --- FLATS SEARCH ---
+        if ($reusePreviousFlatSelection) {
+            $previousSelectionKey = Get-AsiToPixFlatSelectionKey `
+                -Camera $sessionCamFull `
+                -Filter $filt `
+                -Target $targetGrp `
+                -Setup $telSetup `
+                -LightSession $sessionDate
+            if ($previousFlatSelectionByKey.ContainsKey($previousSelectionKey)) {
+                $previousSelection = $previousFlatSelectionByKey[$previousSelectionKey]
+                if (Test-Path -LiteralPath $previousSelection.SourcePath -PathType Container) {
+                    $resolvedPreviousFlatPath = (Resolve-Path -LiteralPath $previousSelection.SourcePath -ErrorAction Stop).ProviderPath
+                    $sourceMode = if ($previousSelection.SourceMode -in @("Master", "Source")) {
+                        $previousSelection.SourceMode
+                    } else {
+                        "Previous"
+                    }
+                    $fFound = [PSCustomObject]@{
+                        Name     = Split-Path -Path $resolvedPreviousFlatPath -Leaf
+                        FullName = $resolvedPreviousFlatPath
+                        Origin   = Join-Path -Path $sourceMode -ChildPath "flats"
+                    }
+                    $foundIn = $fFound.Origin
+                    Write-Host "  Reused flat selection: $($fFound.FullName)" -ForegroundColor Cyan
+                } else {
+                    Write-Host (
+                        "  [!] Previous flat selection is unavailable and will be requested again: {0}" -f `
+                            $previousSelection.SourcePath
+                    ) -ForegroundColor Yellow
+                }
+            }
+        }
+
+        if ($null -eq $fFound) {
         # Build list of all raw filter names that map to the same normalized filter,
         # so a flat shot as "IRC" is accepted for lights shot as "L" (and vice versa),
         # but "None" and "L" are kept separate (different flat corrections).
@@ -1328,17 +1579,15 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
 
         # --- Robust filter match: look for filter as separate word or after date ---
         function FlatFolderMatchesFilter($folderName, $aliases) {
-            if ([string]::IsNullOrWhiteSpace($folderName) -or $folderName.Length -lt 8) {
+            if ([string]::IsNullOrWhiteSpace($folderName)) {
                 return $false
             }
 
-            $datePart = $folderName.Substring(0,8)
-            $rest = $folderName.Substring(8).TrimStart()
-            $filtPart = $null
-            if ($rest -match '^(filt)?([^ _]+)') { $filtPart = $Matches[2] }
+            $folderInfo = Get-AsiToPixFlatFolderInfo -Name $folderName
+            $filtPart = $folderInfo.FilterName
             
             # DEBUG: Uncomment for debugging filter matching
-            # Write-Host "[DEBUG] FlatFolder: $folderName | Parsed date: $datePart | Parsed filter: $filtPart | Aliases: $($aliases -join ', ')" -ForegroundColor DarkGray
+            # Write-Host "[DEBUG] FlatFolder: $folderName | Parsed date: $($folderInfo.DateText) | Parsed filter: $filtPart | Aliases: $($aliases -join ', ')" -ForegroundColor DarkGray
             
             foreach ($alias in $aliases) {
                 if ($filtPart -eq $alias) { 
@@ -1384,9 +1633,11 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
                             $warn = $true
                             Write-Host "[!] Flat folder '$folderName' is too short to contain a yy.MM.dd date prefix" -ForegroundColor Red
                         } else {
-                            $date = $folderName.Substring(0,8)
-                            $rest = $folderName.Substring(8).TrimStart()
-                            if ($rest -match '^(filt)?([^ _]+)') { $flatFilt = $Matches[2] }
+                            $folderInfo = Get-AsiToPixFlatFolderInfo -Name $folderName
+                            $date = $folderInfo.DateText
+                            if (-not [string]::IsNullOrWhiteSpace($folderInfo.FilterName)) {
+                                $flatFilt = $folderInfo.FilterName
+                            }
                             else { $warn = $true; Write-Host "[!] Flat folder '$folderName' does not match expected pattern (date filt<Filter> or date <Filter>)" -ForegroundColor Red }
                             # Validate date
                             $dateOk = $false
@@ -1396,7 +1647,7 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
                             # Validate filter
                             if ($flatFilt -and ($knownFilters -notcontains $flatFilt)) { $warn = $true; Write-Host "[!] Unknown filter '$flatFilt' in flat folder: $folderName" -ForegroundColor Red }
                             # Validate angle if present (optional)
-                            if ($folderName -match '(\d+)deg') { $ang = $Matches[1] } else { $ang = $null }
+                            $ang = $folderInfo.AngleDegrees
                             if ($ang -and ($ang -notmatch '^\d+$')) { $warn = $true; Write-Host "[!] Invalid angle in flat folder: $folderName" -ForegroundColor Red }
                             # Write-Host "[DEBUG] Found flat folder: $folderName | Filter: $flatFilt | Date: $date | Angle: $ang" -ForegroundColor Magenta
                             $origin = Join-Path -Path $m -ChildPath $flatRoot.Name
@@ -1436,7 +1687,12 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
                 $dateDiff = 9999
                 if ($candDate -and $sessDateObj) { $dateDiff = [Math]::Abs((New-TimeSpan -Start $candDate -End $sessDateObj).Days) }
 
-                $fAng = if ($fDirName -match "(\d+)deg") { [int]$Matches[1] } else { -888 }
+                $flatFolderInfo = Get-AsiToPixFlatFolderInfo -Name $fDirName
+                $fAng = if ($null -ne $flatFolderInfo.AngleDegrees) {
+                    [int]$flatFolderInfo.AngleDegrees
+                } else {
+                    -888
+                }
                 if ($numCurAng -ne -999 -and $fAng -ne -888) {
                     $angDiff = AngleDiff180 $numCurAng $fAng
                 } else {
@@ -1521,7 +1777,12 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
                 
                 $dateMatch = ($dateDiff -eq 0)
                 $dateNear = ($dateDiff -le 2)
-                $fAng = if ($fDirName -match "(\d+)deg") { [int]$Matches[1] } else { -888 }
+                $flatFolderInfo = Get-AsiToPixFlatFolderInfo -Name $fDirName
+                $fAng = if ($null -ne $flatFolderInfo.AngleDegrees) {
+                    [int]$flatFolderInfo.AngleDegrees
+                } else {
+                    -888
+                }
                 $angMatch = ($numCurAng -ne -999 -and $fAng -ne -888 -and (AngleDiff180 $numCurAng $fAng) -le 2)
                 
                 $dateInPast = ($candDate -and $sessDateObj -and $candDate -lt $sessDateObj)
@@ -1792,6 +2053,7 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
             $foundIn = $fFound.Origin
             }
         }
+        }
 
         if ($fFound) {
             # Clean leading slash for flats display too
@@ -1806,8 +2068,9 @@ foreach ($fFolder in (Get-ChildItem -LiteralPath $lightsRoot -Directory -ErrorAc
             } else {
                 "Unknown"
             }
-            $flatAngle = if ($fFound.Name -match '(?i)(?<!\d)(?<flatAngle>\d{1,3})\s*deg(?![A-Za-z])') {
-                "$($Matches['flatAngle'])deg"
+            $selectedFlatFolderInfo = Get-AsiToPixFlatFolderInfo -Name $fFound.Name
+            $flatAngle = if ($null -ne $selectedFlatFolderInfo.AngleDegrees) {
+                "$($selectedFlatFolderInfo.AngleDegrees)deg"
             } else {
                 "Unknown"
             }
@@ -1983,6 +2246,25 @@ $flatPlan = Get-AsiToPixUniqueFlatPlan -PendingLink $pendingLinks
 $pendingLinks = @($flatPlan.PendingLinks)
 Write-CreateProjectFlatPlanWarning -FlatPlan $flatPlan
 
+$previewPlan = $null
+if ($previewMode) {
+    $previewPlan = Select-AsiToPixPreviewLightPlan -PendingLink $pendingLinks -MaxFramesPerFilter 15
+    $pendingLinks = @($previewPlan.PendingLinks)
+
+    Write-Host "`n--- PREVIEW LIGHT SELECTION ---" -ForegroundColor Cyan
+    foreach ($previewGroup in $previewPlan.Groups) {
+        Write-Host (
+            "  [{0}/{1}] {2}/{3} frame(s) from {4}/{5} session(s)" -f `
+                $previewGroup.Camera,
+                $previewGroup.Filter,
+                $previewGroup.SelectedFrameCount,
+                $previewGroup.AvailableFrameCount,
+                $previewGroup.SelectedSessionCount,
+                $previewGroup.AvailableSessionCount
+        ) -ForegroundColor Yellow
+    }
+}
+
 # Print camera mapping summary
 Write-Host "`n--- CAMERA MAPPING SUMMARY ---" -ForegroundColor Cyan
 foreach ($cam in $camMap.Keys) {
@@ -2004,14 +2286,30 @@ $pendingLinks | Group-Object Type | ForEach-Object {
     Write-Host "[$($_.Name)]"  -ForegroundColor Yellow
     $frameCountWidth = 0
     if ($_.Name -eq "Lights") {
-        $maxFrameCount = ($_.Group | Measure-Object -Property FrameCount -Maximum).Maximum
-        $frameCountWidth = ([string]$maxFrameCount).Length
+        $frameCountWidth = (
+            $_.Group |
+                ForEach-Object {
+                    $originalFrameCountProperty = $_.PSObject.Properties["OriginalFrameCount"]
+                    if ($null -ne $originalFrameCountProperty) {
+                        "$($_.FrameCount)/$($originalFrameCountProperty.Value)"
+                    } else {
+                        [string]$_.FrameCount
+                    }
+                } |
+                Measure-Object -Property Length -Maximum
+        ).Maximum
     }
     $_.Group | Sort-Object Tag, Cam | ForEach-Object {
         # Using a slightly smaller PadRight for better window fit
         $camPart = if ($_.Cam) { " [$($_.Cam)]" } else { "" }
         $frameCountPart = if ($_.Type -eq "Lights") {
-            ("[$($_.FrameCount)]").PadRight($frameCountWidth + 2) + " "
+            $originalFrameCountProperty = $_.PSObject.Properties["OriginalFrameCount"]
+            $frameCountText = if ($null -ne $originalFrameCountProperty) {
+                "$($_.FrameCount)/$($originalFrameCountProperty.Value)"
+            } else {
+                [string]$_.FrameCount
+            }
+            ("[$frameCountText]").PadRight($frameCountWidth + 2) + " "
         } else {
             ""
         }
@@ -2039,8 +2337,22 @@ foreach($m in @("Master","Source")) {
 
 if ($pendingLinks.Count -gt 0) {
     # --- Calculate total size for copy operation ---
-    $uniqueSourcePaths = $pendingLinks.Src | Select-Object -Unique
     $totalSize = 0
+    $previewSourceFiles = @(
+        $pendingLinks |
+            Where-Object { Test-CreateProjectPreviewLightLink -Link $_ } |
+            ForEach-Object { Get-CreateProjectPreviewSourceFile -Link $_ } |
+            Sort-Object -Unique
+    )
+    foreach ($previewSourceFile in $previewSourceFiles) {
+        $totalSize += (Get-Item -LiteralPath $previewSourceFile -ErrorAction Stop).Length
+    }
+
+    $uniqueSourcePaths = @(
+        $pendingLinks |
+            Where-Object { -not (Test-CreateProjectPreviewLightLink -Link $_) } |
+            Select-Object -ExpandProperty Src -Unique
+    )
     foreach ($srcPath in $uniqueSourcePaths) {
         if (Test-Path -LiteralPath $srcPath) {
             $size = (Get-ChildItem -LiteralPath $srcPath -Recurse -File -ErrorAction Stop | Measure-Object -Property Length -Sum).Sum
@@ -2066,7 +2378,13 @@ if ($pendingLinks.Count -gt 0) {
                 $sourceFolderName = Get-AsiToPixProjectSourceFolderName -Type $l.Type
                 $targetTypePath = Join-Path -Path $sourcePath -ChildPath $sourceFolderName
                 $target = Join-Path -Path $targetTypePath -ChildPath $l.Tag
-                New-CreateProjectSymbolicLink -Path $target -Target $l.Src
+                if (Test-CreateProjectPreviewLightLink -Link $l) {
+                    New-CreateProjectPreviewSymbolicLinkSet `
+                        -Destination $target `
+                        -SourceFile @(Get-CreateProjectPreviewSourceFile -Link $l)
+                } else {
+                    New-CreateProjectSymbolicLink -Path $target -Target $l.Src
+                }
             }
             Write-Host "`n[DONE] Symlinks created. Project Root: $setupRoot" -ForegroundColor Yellow
         } else {
@@ -2082,18 +2400,18 @@ if ($pendingLinks.Count -gt 0) {
     if ($copyFiles) {
         # --- ACTION 2: Copy Files using Robocopy ---
         Write-Host "`nCopying files... This may take a while." -ForegroundColor Green
-        $uniqueLinks = $pendingLinks | Sort-Object -Property Src -Unique
 
-        foreach ($l in $uniqueLinks) {
-            # We need to find all target tags that point to this unique source
-            $targetsForSrc = $pendingLinks | Where-Object { $_.Src -eq $l.Src }
-            
-            foreach ($targetEntry in $targetsForSrc) {
-                $sourceFolderName = Get-AsiToPixProjectSourceFolderName -Type $targetEntry.Type
-                $targetTypePath = Join-Path -Path $sourcePath -ChildPath $sourceFolderName
-                $targetPath = Join-Path -Path $targetTypePath -ChildPath $targetEntry.Tag
-                Write-Host "Copying from $($l.Src) to $targetPath" -ForegroundColor DarkGray
-                Copy-CreateProjectDirectory -Source $l.Src -Destination $targetPath
+        foreach ($targetEntry in $pendingLinks) {
+            $sourceFolderName = Get-AsiToPixProjectSourceFolderName -Type $targetEntry.Type
+            $targetTypePath = Join-Path -Path $sourcePath -ChildPath $sourceFolderName
+            $targetPath = Join-Path -Path $targetTypePath -ChildPath $targetEntry.Tag
+            Write-Host "Copying from $($targetEntry.Src) to $targetPath" -ForegroundColor DarkGray
+            if (Test-CreateProjectPreviewLightLink -Link $targetEntry) {
+                Copy-CreateProjectFileSet `
+                    -SourceFile @(Get-CreateProjectPreviewSourceFile -Link $targetEntry) `
+                    -Destination $targetPath
+            } else {
+                Copy-CreateProjectDirectory -Source $targetEntry.Src -Destination $targetPath
             }
         }
         Write-Host "`n[DONE] Files copied. Project Root: $setupRoot" -ForegroundColor Yellow
@@ -2132,6 +2450,8 @@ $meta = @{
     ProjectSourcePath = $sourcePath
     PixPath           = $pixPath
     WbppMasterPath    = Join-Path -Path $pixPath -ChildPath "master"
+    PreviewMode       = $previewMode
+    PreviewFrameCount = if ($null -ne $previewPlan) { $previewPlan.SelectedFrameCount } else { $null }
     Cameras           = @()
     CalibrationSources = @()
 }
@@ -2140,7 +2460,7 @@ foreach ($cam in $camMap.Keys) {
     $filters = ($entry.Sanitized | Select-Object -Unique)
     $targets = ($entry.Targets | Select-Object -Unique)
     # Calibration folders: look for Master roots for each camera
-    $calibrationRoot = Join-Path -Path $baseZ -ChildPath "Calibration"
+    $calibrationRoot = Join-Path -Path $sourceAstroPhotoRoot -ChildPath "Calibration"
     $calibBase = Join-Path -Path $calibrationRoot -ChildPath $cam
     $masterRoot = Join-Path -Path $calibBase -ChildPath "Master"
     $calibFolders = @{}

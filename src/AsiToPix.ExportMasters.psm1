@@ -314,45 +314,55 @@ function Find-AsiToPixProcessingProjectMetadata {
     [OutputType([PSCustomObject[]])]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$ProcessingRoot,
+        [ValidateNotNullOrEmpty()]
+        [string[]]$ProcessingRoot,
 
         [Parameter(Mandatory = $true)]
         [string]$ObjectName
     )
 
-    if (-not (Test-Path -LiteralPath $ProcessingRoot -PathType Container)) {
-        throw "AstroPhoto Processing folder not found: '$ProcessingRoot'."
+    $processingRoots = @(
+        $ProcessingRoot |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Sort-Object -Unique
+    )
+    if ($processingRoots.Count -eq 0) {
+        throw "At least one Processing root is required to find project metadata."
     }
 
-    $resolvedProcessingRoot = (Resolve-Path -LiteralPath $ProcessingRoot -ErrorAction Stop).ProviderPath
-    $objectFolders = @(Get-ChildItem -LiteralPath $resolvedProcessingRoot -Directory -ErrorAction Stop)
-    $objectMatches = @(Get-AsiToPixNameMatch `
-        -DetectedName $ObjectName `
-        -Candidates @($objectFolders | Select-Object -ExpandProperty Name))
-    if ($objectMatches.Count -eq 0) {
-        return @()
-    }
-
-    $projects = foreach ($objectMatch in $objectMatches) {
-        $objectFolder = $objectFolders |
-            Where-Object { $_.Name -eq $objectMatch.Name } |
-            Select-Object -First 1
-        if ($null -eq $objectFolder) {
-            continue
+    $projects = foreach ($processingRootPath in $processingRoots) {
+        if (-not (Test-Path -LiteralPath $processingRootPath -PathType Container)) {
+            throw "Astrophotography Processing folder not found: '$processingRootPath'."
         }
 
-        foreach ($metadataFile in @(Get-ChildItem `
-            -LiteralPath $objectFolder.FullName `
-            -File `
-            -Filter "project_meta.json" `
-            -Recurse `
-            -ErrorAction Stop)) {
-            [PSCustomObject]@{
-                ObjectName  = $objectFolder.Name
-                ProjectName = $metadataFile.Directory.Name
-                ProjectPath = $metadataFile.Directory.FullName
-                MetaPath    = $metadataFile.FullName
-                Score       = $objectMatch.Score
+        $resolvedProcessingRoot = (Resolve-Path -LiteralPath $processingRootPath -ErrorAction Stop).ProviderPath
+        $objectFolders = @(Get-ChildItem -LiteralPath $resolvedProcessingRoot -Directory -ErrorAction Stop)
+        $objectMatches = @(Get-AsiToPixNameMatch `
+            -DetectedName $ObjectName `
+            -Candidates @($objectFolders | Select-Object -ExpandProperty Name))
+
+        foreach ($objectMatch in $objectMatches) {
+            $objectFolder = $objectFolders |
+                Where-Object { $_.Name -eq $objectMatch.Name } |
+                Select-Object -First 1
+            if ($null -eq $objectFolder) {
+                continue
+            }
+
+            foreach ($metadataFile in @(Get-ChildItem `
+                -LiteralPath $objectFolder.FullName `
+                -File `
+                -Filter "project_meta.json" `
+                -Recurse `
+                -ErrorAction Stop)) {
+                [PSCustomObject]@{
+                    ObjectName     = $objectFolder.Name
+                    ProjectName    = $metadataFile.Directory.Name
+                    ProjectPath    = $metadataFile.Directory.FullName
+                    MetaPath       = $metadataFile.FullName
+                    ProcessingRoot = $resolvedProcessingRoot
+                    Score          = $objectMatch.Score
+                }
             }
         }
     }
@@ -368,8 +378,8 @@ function Resolve-AsiToPixProjectMetadataPath {
         [Parameter(Mandatory = $true)]
         [string]$InputValue,
 
-        [AllowEmptyString()]
-        [string]$ProcessingRoot = "",
+        [AllowEmptyCollection()]
+        [string[]]$ProcessingRoot = @(),
 
         [scriptblock]$SelectionReader = {
             param($Prompt)
@@ -403,15 +413,24 @@ function Resolve-AsiToPixProjectMetadataPath {
         throw "Project metadata path not found: '$resolvedInput'."
     }
 
-    if ([string]::IsNullOrWhiteSpace($ProcessingRoot)) {
+    $processingRoots = @(
+        $ProcessingRoot |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Sort-Object -Unique
+    )
+    if ($processingRoots.Count -eq 0) {
         throw "ProcessingRoot is required to resolve object name '$resolvedInput'."
     }
 
     $candidates = @(Find-AsiToPixProcessingProjectMetadata `
-        -ProcessingRoot $ProcessingRoot `
+        -ProcessingRoot $processingRoots `
         -ObjectName $resolvedInput)
     if ($candidates.Count -eq 0) {
-        throw "No processing project matching object name '$resolvedInput' with project_meta.json was found under '$ProcessingRoot'."
+        if ($processingRoots.Count -eq 1) {
+            throw "No processing project matching object name '$resolvedInput' with project_meta.json was found under '$($processingRoots[0])'."
+        }
+
+        throw "No processing project matching object name '$resolvedInput' with project_meta.json was found under these Processing roots: '$($processingRoots -join "', '")'."
     }
 
     if ($candidates.Count -eq 1) {
@@ -818,14 +837,14 @@ function Test-AsiToPixMasterSourceMatch {
     switch ($Master.MasterType) {
         "Bias" {
             return $SourceRecord.Category -eq "Biases" -and
-                $null -ne $Master.Gain -and $Master.Gain -eq $SourceRecord.Gain -and
-                $null -ne $Master.Temperature -and $Master.Temperature -eq $SourceRecord.Temperature
+                ($null -eq $Master.Gain -or $Master.Gain -eq $SourceRecord.Gain) -and
+                ($null -eq $Master.Temperature -or $Master.Temperature -eq $SourceRecord.Temperature)
         }
         "Dark" {
             return $SourceRecord.Category -in @("Darks", "FlatDarks") -and
-                $null -ne $Master.Gain -and $Master.Gain -eq $SourceRecord.Gain -and
-                $null -ne $Master.Temperature -and $Master.Temperature -eq $SourceRecord.Temperature -and
-                $null -ne $Master.Exposure -and $Master.Exposure -eq $SourceRecord.Exposure
+                ($null -eq $Master.Gain -or $Master.Gain -eq $SourceRecord.Gain) -and
+                ($null -eq $Master.Temperature -or $Master.Temperature -eq $SourceRecord.Temperature) -and
+                ($null -eq $Master.Exposure -or $Master.Exposure -eq $SourceRecord.Exposure)
         }
         "Flat" {
             if ($SourceRecord.Category -ne "Flats" -or
@@ -846,31 +865,41 @@ function Test-AsiToPixMasterSourceMatch {
     return $false
 }
 
-function Get-AsiToPixRequiredMasterMetadataIssue {
+function Get-AsiToPixMissingMasterMetadataTag {
     param(
         [Parameter(Mandatory = $true)]
         [object]$Master
     )
 
+    $missingTags = [System.Collections.Generic.List[string]]::new()
     switch ($Master.MasterType) {
         "Bias" {
-            if ($null -eq $Master.Gain -or $null -eq $Master.Temperature) {
-                return "The WBPP bias master name must contain GAIN and TEMP tags."
+            if ($null -eq $Master.Gain) {
+                $missingTags.Add("GAIN")
+            }
+            if ($null -eq $Master.Temperature) {
+                $missingTags.Add("TEMP")
             }
         }
         "Dark" {
-            if ($null -eq $Master.Gain -or $null -eq $Master.Temperature -or $null -eq $Master.Exposure) {
-                return "The WBPP dark master name must contain GAIN, TEMP, and EXP or EXPOSURE tags."
+            if ($null -eq $Master.Gain) {
+                $missingTags.Add("GAIN")
+            }
+            if ($null -eq $Master.Temperature) {
+                $missingTags.Add("TEMP")
+            }
+            if ($null -eq $Master.Exposure) {
+                $missingTags.Add("EXP or EXPOSURE")
             }
         }
         "Flat" {
             if ([string]::IsNullOrWhiteSpace([string]$Master.Filter)) {
-                return "The WBPP flat master name must contain a FILTER tag."
+                $missingTags.Add("FILTER")
             }
         }
     }
 
-    return $null
+    return @($missingTags)
 }
 
 function Get-AsiToPixDestinationMasterState {
@@ -1208,11 +1237,7 @@ function Get-AsiToPixMasterExportPlan {
         }
         $eligibleMasterCount++
 
-        $requiredIssue = Get-AsiToPixRequiredMasterMetadataIssue -Master $master
         $allIssues = @($master.Issues)
-        if ($null -ne $requiredIssue) {
-            $allIssues += $requiredIssue
-        }
         if ($allIssues.Count -gt 0) {
             $entries.Add([PSCustomObject]@{
                 Status          = "Skipped"
@@ -1225,27 +1250,50 @@ function Get-AsiToPixMasterExportPlan {
             continue
         }
 
-        $sourceMatches = @($sourceRecords | Where-Object { Test-AsiToPixMasterSourceMatch -Master $master -SourceRecord $_ })
-        $destinationFolders = @($sourceMatches.DestinationFolder | Sort-Object -Unique)
-        if ($destinationFolders.Count -eq 0) {
+        $missingTags = @(Get-AsiToPixMissingMasterMetadataTag -Master $master)
+        if ($master.MasterType -eq "Flat" -and $missingTags.Count -gt 0) {
             $entries.Add([PSCustomObject]@{
                 Status          = "Skipped"
                 MasterType      = $master.MasterType
                 SourcePath      = $file.FullName
                 DestinationPath = $null
                 DuplicateOf     = $null
-                Reason          = "No matching calibration source mapping was found."
+                Reason          = "The WBPP flat master name must contain a FILTER tag."
+            })
+            continue
+        }
+
+        $sourceMatches = @($sourceRecords | Where-Object { Test-AsiToPixMasterSourceMatch -Master $master -SourceRecord $_ })
+        $destinationFolders = @($sourceMatches.DestinationFolder | Sort-Object -Unique)
+        if ($destinationFolders.Count -eq 0) {
+            $missingTagReason = if ($missingTags.Count -gt 0) {
+                " Missing filename tags ($($missingTags -join ', ')) can be inferred only when project metadata identifies one destination folder."
+            } else {
+                ""
+            }
+            $entries.Add([PSCustomObject]@{
+                Status          = "Skipped"
+                MasterType      = $master.MasterType
+                SourcePath      = $file.FullName
+                DestinationPath = $null
+                DuplicateOf     = $null
+                Reason          = "No matching calibration source mapping was found.$missingTagReason"
             })
             continue
         }
         if ($destinationFolders.Count -gt 1) {
+            $missingTagReason = if ($missingTags.Count -gt 0) {
+                " The WBPP master name is missing $($missingTags -join ', ') tags, so project metadata cannot identify one destination."
+            } else {
+                ""
+            }
             $entries.Add([PSCustomObject]@{
                 Status          = "Conflict"
                 MasterType      = $master.MasterType
                 SourcePath      = $file.FullName
                 DestinationPath = $null
                 DuplicateOf     = $null
-                Reason          = "Matching Source links point to multiple destination folders: $($destinationFolders -join '; ')."
+                Reason          = "Matching calibration source mappings point to multiple destination folders: $($destinationFolders -join '; ').$missingTagReason"
             })
             continue
         }

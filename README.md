@@ -74,7 +74,7 @@ Format support means that a frame is discovered and can be reported, copied, or 
 
 ## Initial setup
 
-Clone or download the repository, open PowerShell in its directory, and create an `AstroPhoto` root on any available filesystem drive. Most commands automatically search for `*:\AstroPhoto`; if there is no unique match, they prompt for a path. Commands that expose `-AstroPhotoRoot` can be given the path explicitly.
+Clone or download the repository, open PowerShell in its directory, and create an `AstroPhoto` or `Astro` root on any available filesystem drive. Most commands automatically search for both `*:\AstroPhoto` and `*:\Astro`; if there is no unique match, they prompt for a path. Commands that expose `-AstroPhotoRoot` accept either root path explicitly.
 
 The minimum useful root is:
 
@@ -157,7 +157,7 @@ AstroPhoto\Calibration\<camera>\
 ├── Source\
 │   ├── biases\gain<gain>\<temperature>C\yy.MM\
 │   ├── darks\gain<gain>\<temperature>C\<exposure>sec\yy.MM\
-│   └── flats\<setup>\yy.MM.dd <filter> [<angle>deg]\
+│   └── flats\<setup>\yy.MM.dd <filter> [<angle>deg] [<collision exposure>]\
 └── Master\
     ├── biases\...
     ├── darks\...
@@ -169,7 +169,8 @@ Temperatures are rounded to 5-degree folders. Metadata not present in filenames 
 
 ### Processing project
 
-By default, `CreateProject.ps1` creates a setup below `AstroPhoto\Processing\<object>`:
+By default, `CreateProject.ps1` creates a setup below the selected destination
+`AstroPhoto\Processing\<object>` root:
 
 ```text
 AstroPhoto\Processing\<object>\
@@ -215,7 +216,7 @@ TSV exposure cells are Google Sheets formulas beginning with `=`; filters withou
 The TSV data columns are `Catalog number`, `Name`, `Exposure`, `RGB`, `L`, `R`, `G`, `B`, `HO`, `SO`, `Ha`, `OIII`, and `SII`.
 The console report remains compact and uses the `RGB`, `L`, `H`, `O`, and `S` columns.
 
-For each staged object, the report searches the sibling `AstroPhoto\ASIAir` library and matches either the catalog number or readable name against folders such as `M 16 - Eagle nebula`. Catalog compositions separated by `+`, such as `M 8 + M 20 - Lagoon + Trifid nebulae`, are matched by their complete catalog-number set and are not confused with an individual object such as `M 8`. The import workflows use the same matching convention. If no unique match is available, the report prints a warning and puts the original Import folder name in both TSV name columns.
+For each staged object, the report searches the sibling `AstroPhoto\ASIAir` library and matches either the catalog number or readable name against folders such as `M 16 (Eagle nebula)`. The legacy `M 16 - Eagle nebula` format remains supported. Catalog compositions separated by `+`, such as `M 8 + M 20 (Lagoon + Trifid nebulae)`, are matched by their complete catalog-number set and are not confused with an individual object such as `M 8`. The import workflows use the same matching convention. If no unique match is available, the report prints a warning and puts the original Import folder name in both TSV name columns.
 
 Within each setup, TSV rows are sorted by the last word of the resolved `Name`: nebulae first, then galaxies (including clouds), then clusters, followed by unclassified objects. Singular and plural type names are equivalent. The compact console report keeps its existing object order.
 
@@ -258,11 +259,20 @@ Import one session instead:
 
 `SourcePath` may be a folder, a light file in any supported image format, or an object name that can be resolved under an `AstroPhoto\Import` tree. Copy is the interactive default.
 
+When Copy mode reads from and writes to the same network share, the importer automatically batches files through `Robocopy /J /MT:4`. During the transfer it converts Robocopy's noisy multithreaded output into one stable file-progress banner containing the overall percentage, average throughput, and elapsed time, without printing duplicate batch-status lines. Files are first copied into a unique `.asitopix-import-*` staging directory under the destination setup and are then moved into their final night folders only after their sizes have been verified. The importer never overwrites an existing destination file. An incomplete non-empty staging directory is retained after a failure so its files can be recovered; local and mixed-location imports continue to use `Copy-Item`. Symlink mode is unchanged. `ImportSession.ps1` and `ImportAll.ps1` share this implementation.
+
 ### 3. Import calibration frames
 
 The destination `AstroPhoto\Calibration` directory must already exist.
 
+When `SourcePath` is omitted, `ImportCalibration.ps1` automatically discovers direct calibration folders matching `AstroPhoto\Import\<Setup>\bias(es)`, `dark(s)`, or `flat(s)`, prints the complete sorted list with each detected category, and asks once whether to import all of them. An explicit setup root or individual calibration category folder can still be supplied through `SourcePath`.
+
+When the root is selected interactively, the prompt states both roles explicitly. Without `SourcePath`, the selected root supplies the read path `<root>\Import` and the write path `<root>\Calibration`. With an explicit `SourcePath`, only the calibration destination comes from the selected root.
+
 ```powershell
+.\ImportCalibration.ps1 `
+    -AstroPhotoRoot 'D:\AstroPhoto'
+
 .\ImportCalibration.ps1 `
     -SourcePath 'E:\ASIAIR\SQA55' `
     -AstroPhotoRoot 'D:\AstroPhoto' `
@@ -275,25 +285,36 @@ The destination `AstroPhoto\Calibration` directory must already exist.
 
 Optional fallback parameters include `-CameraName`, `-Gain`, `-TemperatureC`, `-DarkExposureSeconds`, `-FilterName`, and `-AngleDegrees`. Filename metadata takes precedence; fallback values fill only missing data.
 
+Flat captures use the local noon-to-noon night date. If different flat exposures would otherwise share the same night/filter/angle folder, the earliest new exposure keeps the canonical folder and additional physical sets receive a neutral exposure suffix, for example `26.04.08 L 2deg 800ms`. Existing canonical folders keep their current exposure assignment. The suffix does not participate in filter, date, or rotator-angle matching.
+
+Copying between locations on the same network share automatically uses `Robocopy /J /MT:4` through a unique staging directory under `Calibration`. The same single progress banner used by light imports reports the file count, average throughput, and elapsed time. Local and mixed-location calibration imports retain the `Copy-Item` fallback.
+
 ### 4. Create a PixInsight project
 
 ```powershell
 .\CreateProject.ps1
+
+.\CreateProject.ps1 `
+    -SourceAstroPhotoRoot 'Z:\AstroPhoto' `
+    -DestinationAstroPhotoRoot 'C:\Astro'
 ```
 
 Or use `Run-CreateProject.cmd`.
 
 The script:
 
-1. Finds the `AstroPhoto` root.
-2. Accepts a light folder, a supported image file, or an object name from the ASIAir archive.
-3. Confirms the detected object, season, scope, and project path.
-4. Scans all filter/night folders for that object and setup.
-5. Selects matching master or source calibration folders and asks for flat choices where necessary.
-6. Shows the complete project tree and asks whether to create directory symlinks or copy the data.
-7. Writes `project_meta.json` beside `Source` and `Pix`.
+1. Selects a source root used only to read `ASIAir` lights and `Calibration`.
+2. Independently selects a destination root used to write the `Processing` project.
+3. Accepts a light folder, a supported image file, or an object name from the source ASIAir archive.
+4. Confirms the detected object, season, scope, and destination project path.
+5. Scans all filter/night folders for that object and setup.
+6. Selects matching master or source calibration folders and asks for flat choices where necessary.
+7. Shows the complete project tree and asks whether to create directory symlinks or copy the data.
+8. Writes `project_meta.json` beside `Source` and `Pix` on the destination root.
 
 Use `-WhatIf` to preview filesystem changes. If the generated `Source` tree already exists, read the cleanup prompt carefully: accepting it replaces that generated input tree, not the archived source data.
+The aliases `-SourceRoot` and `-DestinationRoot` are accepted for the two root parameters. Selecting the same root for both roles preserves the previous layout.
+When rebuilding an existing project, `CreateProject.ps1` can reuse its per-night flat selections from `project_meta.json`. Sessions that are new, ambiguous, or refer to a flat folder that is no longer available still show the normal flat-selection menu.
 
 ### 5. Run WBPP
 

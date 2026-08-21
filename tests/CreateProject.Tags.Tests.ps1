@@ -130,16 +130,82 @@ Describe "CreateProject WBPP calibration tags" {
         $scriptText | Should Match 'function Find-CreateProjectAsiairSourceCandidate'
         $scriptText | Should Match 'Join-Path -Path \$AstroPhotoRoot -ChildPath "ASIAir"'
         $scriptText | Should Match 'Matching ASIAir projects'
-        $scriptText | Should Match 'Resolve-CreateProjectInputPath -InputPath \$inputPath -AstroPhotoRoot \$baseZ'
+        $scriptText | Should Match 'Resolve-CreateProjectInputPath -InputPath \$inputPath -AstroPhotoRoot \$sourceAstroPhotoRoot'
         $scriptText | Should Not Match 'Join-Path -Path \$AstroPhotoRoot -ChildPath "Import"'
+    }
+
+    It "uses independent source and destination astrophotography roots" {
+        $scriptText | Should Match '\[string\]\$SourceAstroPhotoRoot'
+        $scriptText | Should Match '\[string\]\$DestinationAstroPhotoRoot'
+        $scriptText | Should Match 'Join-Path -Path \$sourceAstroPhotoRoot -ChildPath "ASIAir"'
+        $scriptText | Should Match 'Join-Path -Path \$sourceAstroPhotoRoot -ChildPath "Calibration"'
+        $scriptText | Should Match 'Join-Path -Path \$destinationAstroPhotoRoot -ChildPath "Processing"'
+        $scriptText | Should Match 'Source root\s+\(read\)'
+        $scriptText | Should Match 'Destination root \(write\)'
+        $scriptText | Should Match '-SelectionPrompt "Select SOURCE root folder \(ASIAir and Calibration\)"'
+        $scriptText | Should Match '-SelectionPrompt "Select DESTINATION folder \(Processing/project\)"'
+        $scriptText | Should Match 'Write-Host ""\s+\$inputPath = \(Read-Host "Paste lights path, supported image file, or ASIAir object name"\)'
+        $scriptText | Should Not Match '\$baseZ'
     }
 
     It "warns about mixed light exposures without splitting CreateProject links" {
         $scriptText | Should Match 'Mixed light exposures in ASIAir session folder'
         $scriptText | Should Match 'ImportSession.ps1 or ImportAll.ps1'
         $scriptText | Should Not Match 'function Get-CreateProjectLightFileGroup'
-        $scriptText | Should Not Match 'SourceFiles ='
-        $scriptText | Should Not Match 'Copy-CreateProjectFileSet'
+    }
+
+    It "offers preview mode after the OSC merge prompt with a blank line and No as the default" {
+        $previewPrompt = '-Prompt "Use preview mode (10-15 frames per filter)?"'
+        $previewPromptIndex = $scriptText.IndexOf($previewPrompt)
+        $cameraSummaryIndex = $scriptText.IndexOf('--- CAMERA MAPPING SUMMARY ---')
+        $promptWithDefaultPattern = [regex]::Escape($previewPrompt) + '\s+`\s*\r?\n\s+-DefaultYes \$false'
+        $promptPlacementPattern = 'Allow WBPP to merge OSC sessions with filters IRC and Trib into a single one L\?"\s*\r?\n\s*Write-Host ""\s*\r?\n\s*\$previewMode = Read-CreateProjectConfirmation'
+
+        $scriptText | Should Match 'Select-AsiToPixPreviewLightPlan -PendingLink \$pendingLinks -MaxFramesPerFilter 15'
+        $scriptText.Contains($previewPrompt) | Should Be $true
+        $scriptText | Should Match $promptWithDefaultPattern
+        $scriptText | Should Match $promptPlacementPattern
+        ($previewPromptIndex -ge 0) | Should Be $true
+        ($previewPromptIndex -lt $cameraSummaryIndex) | Should Be $true
+    }
+
+    It "creates preview projects from selected files instead of whole light folders" {
+        $scriptText | Should Match 'SourceFiles\s+= @\(\$imageFiles \| Select-Object -ExpandProperty FullName\)'
+        $scriptText | Should Match 'function New-CreateProjectPreviewSymbolicLinkSet'
+        $scriptText | Should Match 'function Copy-CreateProjectFileSet'
+        $scriptText | Should Match 'Join-Path -Path \$Destination -ChildPath \(Split-Path -Path \$sourcePath -Leaf\)'
+        $scriptText | Should Match 'PreviewMode\s+= \$previewMode'
+        $scriptText | Should Match 'PreviewFrameCount\s+= if'
+    }
+
+    It "preserves full preview filenames and uses extended Windows paths for long symlinks" {
+        $tokens = $null
+        $parseErrors = $null
+        $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            $scriptPath,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        $functionNames = @(
+            'ConvertTo-CreateProjectExtendedPath'
+        )
+        $functionAsts = @($scriptAst.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -in $functionNames
+        }, $true))
+        foreach ($functionAst in $functionAsts) {
+            . ([scriptblock]::Create($functionAst.Extent.Text))
+        }
+
+        ConvertTo-CreateProjectExtendedPath -Path 'C:\Astro\frame.fit' |
+            Should Be '\\?\C:\Astro\frame.fit'
+        ConvertTo-CreateProjectExtendedPath -Path '\\server\Astro\frame.fit' |
+            Should Be '\\?\UNC\server\Astro\frame.fit'
+        $scriptText | Should Match 'Link \(\$\(\$Path\.Length\) chars\)'
+        $scriptText | Should Match 'Target \(\$\(\$Target\.Length\) chars\)'
+        $scriptText | Should Not Match 'preview_\{0:D3\}'
+        $scriptText | Should Match 'Copy-Item -LiteralPath \$copySourcePath -Destination \$copyTargetPath'
     }
 
     It "keeps the original flat selection prompt behavior" {
@@ -147,6 +213,22 @@ Describe "CreateProject WBPP calibration tags" {
         $scriptText | Should Not Match '\$flatSelectionCache'
         $scriptText | Should Not Match 'or S to skip'
         $scriptText | Should Not Match 'Flats skipped for'
+    }
+
+    It "offers to reuse previous flat selections and asks only for unmatched nights" {
+        $previousRunIndex = $scriptText.IndexOf('Previous run detected:')
+        $scannerIndex = $scriptText.IndexOf('# SCANNER - iterates filter-group folders')
+
+        $scriptText | Should Match 'Join-Path -Path \$setupRoot -ChildPath "project_meta\.json"'
+        $scriptText | Should Match 'Get-AsiToPixPreviousFlatSelectionPlan'
+        $scriptText | Should Match 'Previous run detected: \{0\} \{1\} \{2\} \{3\} \{4\} selected'
+        $scriptText | Should Match '-Prompt "Reuse flat selection from the previous run\?"\s+`\s*\r?\n\s+-DefaultYes \$true'
+        $scriptText | Should Match 'Get-AsiToPixFlatSelectionKey'
+        $scriptText | Should Match '\$previousFlatSelectionByKey\.ContainsKey\(\$previousSelectionKey\)'
+        $scriptText | Should Match 'Previous flat selection is unavailable and will be requested again'
+        $scriptText | Should Match 'if \(\$null -eq \$fFound\) \{\s+# Build list of all raw filter names'
+        ($previousRunIndex -ge 0) | Should Be $true
+        ($previousRunIndex -lt $scannerIndex) | Should Be $true
     }
 
     It "maps unfiltered OSC lights to RGB without merging them into L" {

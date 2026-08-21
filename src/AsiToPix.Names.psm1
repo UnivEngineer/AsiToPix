@@ -28,6 +28,44 @@ function Get-AsiToPixCatalogIdentifierSet {
     return @($identifiers | Sort-Object -Unique)
 }
 
+function ConvertFrom-AsiToPixArchiveObjectFolderName {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FolderName
+    )
+
+    $trimmedFolderName = $FolderName.Trim()
+    $match = [regex]::Match(
+        $trimmedFolderName,
+        '^(?<catalog>.+?)\s+-\s+(?<name>.+)$'
+    )
+    if (-not $match.Success) {
+        $match = [regex]::Match(
+            $trimmedFolderName,
+            '^(?<catalog>.+?)\s+\((?<name>.+)\)$'
+        )
+    }
+
+    if (-not $match.Success) {
+        return $null
+    }
+
+    $catalogNumber = $match.Groups['catalog'].Value.Trim()
+    $objectName = $match.Groups['name'].Value.Trim()
+    if ([string]::IsNullOrWhiteSpace($catalogNumber) -or
+        [string]::IsNullOrWhiteSpace($objectName)) {
+        return $null
+    }
+
+    return [PSCustomObject]@{
+        FolderName    = $trimmedFolderName
+        CatalogNumber = $catalogNumber
+        Name          = $objectName
+    }
+}
+
 function Get-AsiToPixNameMatch {
     [CmdletBinding()]
     [OutputType([PSCustomObject[]])]
@@ -101,4 +139,6 @@ function Get-AsiToPixNameMatch {
     return @($nameMatches | Sort-Object -Property @{ Expression = "Score"; Descending = $true }, Name)
 }
 
-Export-ModuleMember -Function Get-AsiToPixNameMatch
+Export-ModuleMember -Function `
+    ConvertFrom-AsiToPixArchiveObjectFolderName, `
+    Get-AsiToPixNameMatch

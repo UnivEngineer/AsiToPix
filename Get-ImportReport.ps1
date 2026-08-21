@@ -21,7 +21,7 @@ if ($ImportPath.Count -eq 0) {
 }
 
 if ($ImportPath.Count -eq 0) {
-    throw "No Import folder found by pattern *:\AstroPhoto\Import. Pass its path with -ImportPath."
+    throw "No Import folder found by patterns *:\AstroPhoto\Import and *:\Astro\Import. Pass its path with -ImportPath."
 }
 
 $resolvedImportPaths = foreach ($path in $ImportPath) {

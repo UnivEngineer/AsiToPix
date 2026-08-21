@@ -12,6 +12,8 @@ $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile(
     [ref]$parseErrors
 )
 $functionNames = @(
+    'Resolve-CreateProjectFullPath',
+    'Resolve-CreateProjectAstroRoot',
     'ConvertTo-CreateProjectDate',
     'Get-CreateProjectNightDate',
     'Get-CreateProjectDateFromFileName',
@@ -46,6 +48,23 @@ function Write-CreateProjectCalibrationDirectoryWarning {
 }
 
 Describe "CreateProject calibration selection" {
+    It "accepts explicit independent astrophotography roots" {
+        $sourceRoot = Join-Path -Path $TestDrive -ChildPath 'source\AstroPhoto'
+        $destinationRoot = Join-Path -Path $TestDrive -ChildPath 'destination\Astro'
+        [void](New-Item -ItemType Directory -Path $sourceRoot, $destinationRoot -Force)
+
+        Resolve-CreateProjectAstroRoot `
+            -Path $sourceRoot `
+            -Purpose 'source' `
+            -SelectionPrompt 'Select SOURCE root folder (ASIAir and Calibration)' |
+            Should Be (Resolve-Path -LiteralPath $sourceRoot).ProviderPath
+        Resolve-CreateProjectAstroRoot `
+            -Path $destinationRoot `
+            -Purpose 'destination' `
+            -SelectionPrompt 'Select DESTINATION folder (Processing/project)' |
+            Should Be (Resolve-Path -LiteralPath $destinationRoot).ProviderPath
+    }
+
     It "parses exposure-suffixed session folder dates" {
         (ConvertTo-CreateProjectDate -DateText '26.07.17-60s').ToString('yyyy-MM-dd') |
             Should Be '2026-07-17'

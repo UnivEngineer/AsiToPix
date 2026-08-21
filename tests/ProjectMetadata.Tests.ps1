@@ -115,6 +115,7 @@ Describe "Project calibration metadata" {
     It "rejects calibration sources outside the configured Source and Master roots" {
         $cameraRoot = Join-Path -Path $TestDrive -ChildPath "Calibration\ASI2600MM"
         $masterRoot = Join-Path -Path $cameraRoot -ChildPath "Master\darks"
+        $sourceRoot = Join-Path -Path $cameraRoot -ChildPath "Source\darks"
         $outsidePath = Join-Path -Path $TestDrive -ChildPath "Other\darks\Gain120\-10C\120sec\26.07"
         $camera = [PSCustomObject]@{
             Name = "ASI2600MM"
@@ -131,6 +132,6 @@ Describe "Project calibration metadata" {
         }
 
         { ConvertTo-AsiToPixCalibrationSourceMetadata -PendingLink @($pendingLink) -CameraMetadata @($camera) } |
-            Should Throw
+            Should Throw "Calibration source path '$outsidePath' is outside both '$sourceRoot' and '$masterRoot'."
     }
 }

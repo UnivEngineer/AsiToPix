@@ -39,6 +39,199 @@ function New-TestFlatPendingLink {
     }
 }
 
+function New-TestLightPendingLink {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Camera,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Filter,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Session,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 1000)]
+        [int]$FrameCount
+    )
+
+    $sourceFiles = @(
+        1..$FrameCount | ForEach-Object {
+            Join-Path -Path $SourcePath -ChildPath ("frame_{0:D3}.fit" -f $_)
+        }
+    )
+
+    return [PSCustomObject]@{
+        Type        = "Lights"
+        Tag         = "Session_${Session}_Filter_${Filter}_Cam_${Camera}"
+        Src         = $SourcePath
+        Display     = $SourcePath
+        Cam         = $Camera
+        Filter      = $Filter
+        Session     = $Session
+        FrameCount  = $FrameCount
+        SourceFiles = $sourceFiles
+    }
+}
+
+Describe "CreateProject preview light planning" {
+    It "selects five random frames from each of three nights" {
+        $pendingLinks = @(
+            New-TestLightPendingLink -SourcePath "C:\Lights\H\26.07.01" -Camera "ASI2600MM" -Filter "H" -Session "26.07.01" -FrameCount 10
+            New-TestLightPendingLink -SourcePath "C:\Lights\H\26.07.02" -Camera "ASI2600MM" -Filter "H" -Session "26.07.02" -FrameCount 10
+            New-TestLightPendingLink -SourcePath "C:\Lights\H\26.07.03" -Camera "ASI2600MM" -Filter "H" -Session "26.07.03" -FrameCount 10
+        )
+
+        $plan = Select-AsiToPixPreviewLightPlan `
+            -PendingLink $pendingLinks `
+            -MaxFramesPerFilter 15 `
+            -RandomSeed 2600
+        $selectedLights = @($plan.PendingLinks | Where-Object { $_.Type -eq "Lights" })
+
+        $selectedLights.Count | Should Be 3
+        ($selectedLights | Measure-Object -Property FrameCount -Sum).Sum | Should Be 15
+        foreach ($selectedLight in $selectedLights) {
+            $selectedLight.FrameCount | Should Be 5
+            $selectedLight.OriginalFrameCount | Should Be 10
+            @($selectedLight.SelectedFiles).Count | Should Be 5
+            @($selectedLight.SelectedFiles | Sort-Object -Unique).Count | Should Be 5
+        }
+        @($selectedLights.SelectedFiles | Sort-Object -Unique).Count | Should Be 15
+        $plan.Groups[0].SelectedSessionCount | Should Be 3
+    }
+
+    It "selects three random frames from each of five nights" {
+        $pendingLinks = @(
+            1..5 | ForEach-Object {
+                $session = "26.07.{0:D2}" -f $_
+                New-TestLightPendingLink `
+                    -SourcePath "C:\Lights\O\$session" `
+                    -Camera "ASI2600MM" `
+                    -Filter "O" `
+                    -Session $session `
+                    -FrameCount 10
+            }
+        )
+
+        $plan = Select-AsiToPixPreviewLightPlan `
+            -PendingLink $pendingLinks `
+            -MaxFramesPerFilter 15 `
+            -RandomSeed 2601
+        $selectedLights = @($plan.PendingLinks | Where-Object { $_.Type -eq "Lights" })
+
+        $selectedLights.Count | Should Be 5
+        foreach ($selectedLight in $selectedLights) {
+            $selectedLight.FrameCount | Should Be 3
+        }
+        $plan.SelectedFrameCount | Should Be 15
+    }
+
+    It "limits each camera and filter independently and keeps calibration links" {
+        $calibrationLink = [PSCustomObject]@{
+            Type = "Darks"
+            Tag  = "Dark_60s"
+            Src  = "C:\Calibration\Darks\60s"
+        }
+        $pendingLinks = @(
+            New-TestLightPendingLink -SourcePath "C:\Lights\H\26.07.01" -Camera "ASI2600MM" -Filter "H" -Session "26.07.01" -FrameCount 20
+            New-TestLightPendingLink -SourcePath "C:\Lights\H\26.07.02" -Camera "ASI2600MM" -Filter "H" -Session "26.07.02" -FrameCount 20
+            New-TestLightPendingLink -SourcePath "C:\Lights\O\26.07.01" -Camera "ASI2600MM" -Filter "O" -Session "26.07.01" -FrameCount 7
+            New-TestLightPendingLink -SourcePath "C:\Lights\H\26.07.01-OSC" -Camera "ASI2600MC" -Filter "H" -Session "26.07.01" -FrameCount 20
+            $calibrationLink
+        )
+
+        $plan = Select-AsiToPixPreviewLightPlan `
+            -PendingLink $pendingLinks `
+            -MaxFramesPerFilter 15 `
+            -RandomSeed 533
+
+        $plan.Groups.Count | Should Be 3
+        $plan.SelectedFrameCount | Should Be 37
+        @($plan.PendingLinks | Where-Object { $_.Type -eq "Darks" }).Count | Should Be 1
+        @($plan.PendingLinks | Where-Object {
+            $_.Type -eq "Lights" -and $_.Cam -eq "ASI2600MM" -and $_.Filter -eq "H"
+        } | Measure-Object -Property FrameCount -Sum).Sum | Should Be 15
+        @($plan.PendingLinks | Where-Object {
+            $_.Type -eq "Lights" -and $_.Cam -eq "ASI2600MM" -and $_.Filter -eq "O"
+        } | Measure-Object -Property FrameCount -Sum).Sum | Should Be 7
+        @($plan.PendingLinks | Where-Object {
+            $_.Type -eq "Lights" -and $_.Cam -eq "ASI2600MC" -and $_.Filter -eq "H"
+        } | Measure-Object -Property FrameCount -Sum).Sum | Should Be 15
+    }
+}
+
+Describe "CreateProject previous flat-selection planning" {
+    It "restores one selected flat for every recorded light session" {
+        $calibrationSources = @(
+            [PSCustomObject]@{
+                Type          = "Flats"
+                Camera        = "ASI2600MM"
+                Filter        = "H"
+                Target        = "H"
+                Setup         = "SQA55 @ 1.0x"
+                SourcePath    = "C:\Calibration\ASI2600MM\Source\flats\SQA55 @ 1.0x\26.07.01 H"
+                SourceMode    = "Source"
+                FlatSetId     = "flat-a"
+                LightSessions = @("26.07.01", "26.07.02")
+            }
+            [PSCustomObject]@{
+                Type          = "Flats"
+                Camera        = "ASI2600MM"
+                Filter        = "O"
+                Target        = "O"
+                Setup         = "SQA55 @ 1.0x"
+                SourcePath    = "C:\Calibration\ASI2600MM\Master\flats\SQA55 @ 1.0x\26.07.03 O"
+                SourceMode    = "Master"
+                FlatSetId     = "flat-b"
+                LightSessions = @("26.07.03")
+            }
+            [PSCustomObject]@{
+                Type          = "Darks"
+                Camera        = "ASI2600MM"
+                SourcePath    = "C:\Calibration\ASI2600MM\Source\darks"
+                LightSessions = @("26.07.01")
+            }
+        )
+
+        $plan = Get-AsiToPixPreviousFlatSelectionPlan -CalibrationSource $calibrationSources
+
+        $plan.SessionCount | Should Be 3
+        $plan.FlatSelectionCount | Should Be 3
+        $plan.Conflicts.Count | Should Be 0
+        $plan.Selections.Count | Should Be 3
+        @($plan.Selections | Where-Object {
+            $_.Filter -eq "H" -and $_.LightSession -eq "26.07.02"
+        }).Count | Should Be 1
+    }
+
+    It "does not reuse an ambiguous selection for the same camera, filter, setup, and night" {
+        $common = @{
+            Type          = "Flats"
+            Camera        = "ASI2600MM"
+            Filter        = "H"
+            Target        = "H"
+            Setup         = "SQA55 @ 1.0x"
+            SourceMode    = "Source"
+            LightSessions = @("26.07.01")
+        }
+        $first = [PSCustomObject]$common.Clone()
+        $first | Add-Member -NotePropertyName SourcePath -NotePropertyValue "C:\Calibration\flats\first"
+        $second = [PSCustomObject]$common.Clone()
+        $second | Add-Member -NotePropertyName SourcePath -NotePropertyValue "C:\Calibration\flats\second"
+
+        $plan = Get-AsiToPixPreviousFlatSelectionPlan -CalibrationSource @($first, $second)
+
+        $plan.SessionCount | Should Be 1
+        $plan.FlatSelectionCount | Should Be 0
+        $plan.Selections.Count | Should Be 0
+        $plan.Conflicts.Count | Should Be 1
+        $plan.Conflicts[0].SourcePaths.Count | Should Be 2
+    }
+}
+
 Describe "CreateProject flat-set planning" {
     It "deduplicates the SMC 180s and 300s sessions by their physical flat source" {
         $cameraRoot = Join-Path -Path $TestDrive -ChildPath "Calibration\ASI2600MM"

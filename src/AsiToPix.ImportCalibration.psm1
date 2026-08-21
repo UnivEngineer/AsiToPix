@@ -130,6 +130,52 @@ function Get-AsiToPixCalibrationCategoryName {
     return $null
 }
 
+function Find-AsiToPixCalibrationImportFolder {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ImportRoot,
+
+        [ValidateSet("Bias", "Dark", "Flat")]
+        [string[]]$Category = @("Bias", "Dark", "Flat")
+    )
+
+    if (-not (Test-Path -LiteralPath $ImportRoot -PathType Container)) {
+        return @()
+    }
+
+    $resolvedImportRoot = (Resolve-Path -LiteralPath $ImportRoot).ProviderPath
+    $folders = foreach ($setupFolder in Get-ChildItem -LiteralPath $resolvedImportRoot -Directory -ErrorAction Stop) {
+        foreach ($categoryFolder in Get-ChildItem -LiteralPath $setupFolder.FullName -Directory -ErrorAction Stop) {
+            $detectedCategory = Get-AsiToPixCalibrationCategoryName -FolderName $categoryFolder.Name
+            if ($detectedCategory -in $Category) {
+                [PSCustomObject]@{
+                    SetupName  = $setupFolder.Name
+                    SourcePath = $categoryFolder.FullName
+                    Category   = $detectedCategory
+                }
+            }
+        }
+    }
+
+    return @($folders | Sort-Object SetupName, SourcePath)
+}
+
+function Get-AsiToPixCalibrationSetupName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath
+    )
+
+    $resolvedSourcePath = (Resolve-Path -LiteralPath $SourcePath).ProviderPath
+    $sourceName = Split-Path -Path $resolvedSourcePath -Leaf
+    if ($null -ne (Get-AsiToPixCalibrationCategoryName -FolderName $sourceName)) {
+        return (Split-Path -Path (Split-Path -Path $resolvedSourcePath -Parent) -Leaf)
+    }
+
+    return $sourceName
+}
+
 function ConvertFrom-AsiToPixCalibrationFileName {
     param(
         [Parameter(Mandatory = $true)]
@@ -210,19 +256,29 @@ function Get-AsiToPixCalibrationSourceRecord {
     )
 
     $resolvedSourcePath = (Resolve-Path -LiteralPath $SourcePath).ProviderPath
-    $categoryFolders = @(Get-ChildItem -LiteralPath $resolvedSourcePath -Directory -ErrorAction Stop |
-        ForEach-Object {
-            $category = Get-AsiToPixCalibrationCategoryName -FolderName $_.Name
-            if ($null -ne $category) {
-                [PSCustomObject]@{
-                    Directory = $_
-                    Category  = $category
+    $sourceDirectory = Get-Item -LiteralPath $resolvedSourcePath -Force -ErrorAction Stop
+    $sourceCategory = Get-AsiToPixCalibrationCategoryName -FolderName $sourceDirectory.Name
+    $categoryFolders = @(
+        if ($null -ne $sourceCategory) {
+            [PSCustomObject]@{
+                Directory = $sourceDirectory
+                Category  = $sourceCategory
+            }
+        } else {
+            Get-ChildItem -LiteralPath $resolvedSourcePath -Directory -ErrorAction Stop | ForEach-Object {
+                $category = Get-AsiToPixCalibrationCategoryName -FolderName $_.Name
+                if ($null -ne $category) {
+                    [PSCustomObject]@{
+                        Directory = $_
+                        Category  = $category
+                    }
                 }
             }
-        })
+        }
+    )
 
     if ($categoryFolders.Count -eq 0) {
-        throw "No flat(s), dark(s), or bias(es) folders found directly under import root: $resolvedSourcePath"
+        throw "Source is not a calibration category folder and contains no flat(s), dark(s), or bias(es) folders: $resolvedSourcePath"
     }
 
     $records = @()
@@ -321,6 +377,53 @@ function Get-AsiToPixCalibrationNightStart {
     }
 
     return $nightStart
+}
+
+function ConvertTo-AsiToPixFlatExposureFolderSuffix {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ExposureSeconds
+    )
+
+    $canonicalExposure = ConvertTo-AsiToPixCalibrationNumericText `
+        -Value $ExposureSeconds `
+        -ValueName "flat exposure"
+    $exposure = [decimal]::Parse(
+        $canonicalExposure,
+        [System.Globalization.CultureInfo]::InvariantCulture
+    )
+    if ($exposure -lt [decimal]1) {
+        $milliseconds = $exposure * [decimal]1000
+        return "$($milliseconds.ToString('G29', [System.Globalization.CultureInfo]::InvariantCulture))ms"
+    }
+
+    return "${canonicalExposure}s"
+}
+
+function Get-AsiToPixFlatFolderExposure {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return @()
+    }
+
+    $exposures = foreach ($file in Get-ChildItem -LiteralPath $Path -File -ErrorAction Stop) {
+        if (-not (Test-AsiToPixSupportedCalibrationFileName -FileName $file.Name)) {
+            continue
+        }
+
+        $metadata = ConvertFrom-AsiToPixCalibrationFileName -FileName $file.Name -Category Flat
+        if (-not [string]::IsNullOrWhiteSpace($metadata.ExposureSeconds)) {
+            ConvertTo-AsiToPixCalibrationNumericText `
+                -Value ([string]$metadata.ExposureSeconds) `
+                -ValueName "flat exposure"
+        }
+    }
+
+    return @($exposures | Sort-Object -Unique)
 }
 
 function Get-AsiToPixCalibrationDestinationFolder {
@@ -483,19 +586,120 @@ function ConvertTo-AsiToPixCalibrationImportPlan {
     $resolvedCalibrationRoot = (Resolve-Path -LiteralPath $CalibrationRoot).ProviderPath
     Assert-AsiToPixCalibrationPathSegment -Value $SetupName -ValueName "setup name"
 
+    $destinationRecords = @(
+        foreach ($record in $SourceRecord) {
+            $baseDestinationFolder = Get-AsiToPixCalibrationDestinationFolder `
+                -SourceRecord $record `
+                -CalibrationRoot $resolvedCalibrationRoot `
+                -SetupName $SetupName `
+                -CameraName $CameraName `
+                -Gain $Gain `
+                -TemperatureC $TemperatureC `
+                -DarkExposureSeconds $DarkExposureSeconds `
+                -FilterName $FilterName `
+                -AngleDegrees $AngleDegrees
+            $flatExposureKey = if ($record.Category -eq "Flat" -and
+                -not [string]::IsNullOrWhiteSpace($record.ExposureSeconds)) {
+                ConvertTo-AsiToPixCalibrationNumericText `
+                    -Value ([string]$record.ExposureSeconds) `
+                    -ValueName "flat exposure"
+            } else {
+                $null
+            }
+
+            [PSCustomObject]@{
+                Record                = $record
+                BaseDestinationFolder = $baseDestinationFolder
+                DestinationFolder     = $baseDestinationFolder
+                FlatExposureKey       = $flatExposureKey
+            }
+        }
+    )
+
+    $flatExposureSplits = @()
+    $reportedFlatSplits = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($flatGroup in @(
+        $destinationRecords |
+            Where-Object { $_.Record.Category -eq "Flat" } |
+            Group-Object BaseDestinationFolder
+    )) {
+        $baseFolder = $flatGroup.Name
+        $baseImageFiles = @(
+            if (Test-Path -LiteralPath $baseFolder -PathType Container) {
+                Get-ChildItem -LiteralPath $baseFolder -File -ErrorAction Stop |
+                    Where-Object { Test-AsiToPixSupportedCalibrationFileName -FileName $_.Name }
+            }
+        )
+        $baseExposureKeys = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+        )
+        foreach ($existingExposure in @(Get-AsiToPixFlatFolderExposure -Path $baseFolder)) {
+            [void]$baseExposureKeys.Add([string]$existingExposure)
+        }
+
+        $knownFlatRecords = @($flatGroup.Group | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_.FlatExposureKey)
+        })
+        $unknownFlatRecords = @($flatGroup.Group | Where-Object {
+            [string]::IsNullOrWhiteSpace($_.FlatExposureKey)
+        })
+        if ($baseImageFiles.Count -eq 0 -and
+            $unknownFlatRecords.Count -eq 0 -and
+            $knownFlatRecords.Count -gt 0) {
+            $primaryFlatRecord = $knownFlatRecords |
+                Sort-Object `
+                    @{ Expression = { $_.Record.CapturedAt } }, `
+                    @{ Expression = { $_.Record.File.FullName } } |
+                Select-Object -First 1
+            [void]$baseExposureKeys.Add([string]$primaryFlatRecord.FlatExposureKey)
+        }
+
+        foreach ($destinationRecord in $knownFlatRecords) {
+            $exposureKey = [string]$destinationRecord.FlatExposureKey
+            if ($baseExposureKeys.Contains($exposureKey)) {
+                continue
+            }
+
+            $exposureSuffix = ConvertTo-AsiToPixFlatExposureFolderSuffix -ExposureSeconds $exposureKey
+            $suffixFolder = "$baseFolder $exposureSuffix"
+            $suffixImageFiles = @(
+                if (Test-Path -LiteralPath $suffixFolder -PathType Container) {
+                    Get-ChildItem -LiteralPath $suffixFolder -File -ErrorAction Stop |
+                        Where-Object { Test-AsiToPixSupportedCalibrationFileName -FileName $_.Name }
+                }
+            )
+            $suffixExposureKeys = @(
+                Get-AsiToPixFlatFolderExposure -Path $suffixFolder
+            )
+            if ($suffixImageFiles.Count -gt 0 -and $exposureKey -notin $suffixExposureKeys) {
+                $foundExposureText = if ($suffixExposureKeys.Count -gt 0) {
+                    $suffixExposureKeys -join ", "
+                } else {
+                    "unrecognized"
+                }
+                throw "Flat collision folder '$suffixFolder' contains exposure(s) $foundExposureText, expected $exposureKey seconds."
+            }
+
+            $destinationRecord.DestinationFolder = $suffixFolder
+            $splitKey = "$baseFolder|$exposureKey"
+            if ($reportedFlatSplits.Add($splitKey)) {
+                $flatExposureSplits += [PSCustomObject]@{
+                    BaseFolder        = $baseFolder
+                    DestinationFolder = $suffixFolder
+                    ExposureSeconds   = $exposureKey
+                    Suffix            = $exposureSuffix
+                }
+            }
+        }
+    }
+
     $entries = @()
     $plannedPaths = @{}
-    foreach ($record in $SourceRecord) {
-        $destinationFolder = Get-AsiToPixCalibrationDestinationFolder `
-            -SourceRecord $record `
-            -CalibrationRoot $resolvedCalibrationRoot `
-            -SetupName $SetupName `
-            -CameraName $CameraName `
-            -Gain $Gain `
-            -TemperatureC $TemperatureC `
-            -DarkExposureSeconds $DarkExposureSeconds `
-            -FilterName $FilterName `
-            -AngleDegrees $AngleDegrees
+    foreach ($destinationRecord in $destinationRecords) {
+        $record = $destinationRecord.Record
+        $destinationFolder = $destinationRecord.DestinationFolder
         $destinationPath = Join-Path -Path $destinationFolder -ChildPath $record.File.Name
         $status = "Planned"
         $reason = ""
@@ -552,12 +756,14 @@ function ConvertTo-AsiToPixCalibrationImportPlan {
     }
 
     return [PSCustomObject]@{
+        CalibrationRoot  = $resolvedCalibrationRoot
         SourceCount      = $SourceRecord.Count
         PlannedCount     = @($entries | Where-Object { $_.Status -eq "Planned" }).Count
         ExistingCount    = @($entries | Where-Object { $_.Status -eq "Exists" }).Count
         ConflictCount    = @($entries | Where-Object { $_.Status -eq "Conflict" }).Count
         Entries          = @($entries)
         AdditionWarnings = @($additionWarnings)
+        FlatExposureSplits = @($flatExposureSplits)
     }
 }
 
@@ -587,7 +793,7 @@ function Get-AsiToPixCalibrationImportPlan {
 
     $resolvedSourcePath = (Resolve-Path -LiteralPath $SourcePath).ProviderPath
     if ([string]::IsNullOrWhiteSpace($SetupName)) {
-        $SetupName = Split-Path -Path $resolvedSourcePath -Leaf
+        $SetupName = Get-AsiToPixCalibrationSetupName -SourcePath $resolvedSourcePath
     }
     $sourceRecords = @(Get-AsiToPixCalibrationSourceRecord -SourcePath $resolvedSourcePath)
     return ConvertTo-AsiToPixCalibrationImportPlan `
@@ -709,6 +915,11 @@ function Write-AsiToPixCalibrationImportPlan {
     )
 
     Write-Host "`nImport plan:" -ForegroundColor Cyan
+    foreach ($split in @($Plan.FlatExposureSplits)) {
+        Write-Host "  [flat-set] $($split.ExposureSeconds)s uses neutral folder suffix '$($split.Suffix)':" `
+            -ForegroundColor Yellow
+        Write-Host "    $($split.DestinationFolder)" -ForegroundColor DarkYellow
+    }
     foreach ($entry in $Plan.Entries) {
         $fileName = Split-Path -Path $entry.SourcePath -Leaf
         switch ($entry.Status) {
@@ -737,6 +948,306 @@ function Write-AsiToPixCalibrationImportPlan {
     Write-Host "  Conflicts: $($Plan.ConflictCount)" -ForegroundColor White
 }
 
+function Get-AsiToPixCalibrationUncShareKey {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if ($Path -notmatch '^[\\/]{2}(?<server>[^\\/]+)[\\/](?<share>[^\\/]+)') {
+        return ""
+    }
+
+    return "\\$($Matches['server'].ToLowerInvariant())\$($Matches['share'].ToLowerInvariant())"
+}
+
+function Get-AsiToPixCalibrationNetworkLocationKey {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $uncShareKey = Get-AsiToPixCalibrationUncShareKey -Path $Path
+    if (-not [string]::IsNullOrWhiteSpace($uncShareKey)) {
+        return $uncShareKey
+    }
+
+    $pathRoot = [System.IO.Path]::GetPathRoot($Path)
+    if ([string]::IsNullOrWhiteSpace($pathRoot) -or $pathRoot -notmatch '^(?<drive>[A-Za-z]):[\\/]$') {
+        return ""
+    }
+
+    $driveName = $Matches['drive'].ToUpperInvariant()
+    $drive = Get-PSDrive -Name $driveName -PSProvider FileSystem -ErrorAction SilentlyContinue
+    if ($null -ne $drive) {
+        $displayRootProperty = $drive.PSObject.Properties['DisplayRoot']
+        if ($null -ne $displayRootProperty -and
+            -not [string]::IsNullOrWhiteSpace([string]$displayRootProperty.Value)) {
+            $mappedShareKey = Get-AsiToPixCalibrationUncShareKey -Path ([string]$displayRootProperty.Value)
+            if (-not [string]::IsNullOrWhiteSpace($mappedShareKey)) {
+                return $mappedShareKey
+            }
+        }
+    }
+
+    try {
+        $driveInfo = [System.IO.DriveInfo]::new("${driveName}:\")
+        if ($driveInfo.DriveType -eq [System.IO.DriveType]::Network) {
+            return "drive:$driveName"
+        }
+    } catch {
+        return ""
+    }
+
+    return ""
+}
+
+function Test-AsiToPixCalibrationUseRobocopy {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Entry,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationRoot
+    )
+
+    if ($Entry.Count -eq 0 -or
+        $null -eq (Get-Command robocopy.exe -CommandType Application -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+
+    $destinationKey = Get-AsiToPixCalibrationNetworkLocationKey -Path $DestinationRoot
+    if ([string]::IsNullOrWhiteSpace($destinationKey)) {
+        return $false
+    }
+
+    foreach ($item in $Entry) {
+        $sourceKey = Get-AsiToPixCalibrationNetworkLocationKey -Path $item.SourcePath
+        if ([string]::IsNullOrWhiteSpace($sourceKey) -or
+            -not $sourceKey.Equals($destinationKey, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Get-AsiToPixCalibrationRobocopyProgressStatus {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$CompletedFileCount,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TotalFileCount,
+
+        [Parameter(Mandatory = $true)]
+        [long]$CompletedByteCount,
+
+        [Parameter(Mandatory = $true)]
+        [timespan]$Elapsed,
+
+        [Parameter(Mandatory = $true)]
+        [int]$ThreadCount
+    )
+
+    $percentComplete = [int][Math]::Floor(($CompletedFileCount * 100.0) / $TotalFileCount)
+    $elapsedSeconds = [Math]::Max($Elapsed.TotalSeconds, 0.001)
+    $megabytesPerSecond = ($CompletedByteCount / 1MB) / $elapsedSeconds
+    $elapsedText = "{0:00}:{1:00}:{2:00}" -f [Math]::Floor($Elapsed.TotalHours), $Elapsed.Minutes, $Elapsed.Seconds
+
+    return "$CompletedFileCount/$TotalFileCount files ($percentComplete%), " +
+        ("{0:0.0} MB/s avg, elapsed {1} (Robocopy /MT:{2})" -f $megabytesPerSecond, $elapsedText, $ThreadCount)
+}
+
+function Invoke-AsiToPixCalibrationRobocopyBatch {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateCount(1, 64)]
+        [string[]]$FileName,
+
+        [ValidateRange(1, 16)]
+        [int]$ThreadCount = 4,
+
+        [int]$CompletedFileCount = 0,
+
+        [int]$TotalFileCount = 0,
+
+        [long]$CompletedByteCount = 0,
+
+        [long]$BatchByteCount = 0,
+
+        [long]$TotalByteCount = 0,
+
+        [System.Diagnostics.Stopwatch]$CopyStopwatch
+    )
+
+    $robocopy = Get-Command robocopy.exe -CommandType Application -ErrorAction Stop
+    $arguments = @(
+        $SourceDirectory,
+        $DestinationDirectory
+    ) + $FileName + @(
+        "/J",
+        "/MT:$ThreadCount",
+        "/R:2",
+        "/W:1",
+        "/COPY:DAT",
+        "/DCOPY:DA",
+        "/NDL",
+        "/NJH",
+        "/NJS"
+    )
+
+    $robocopyOutput = [System.Collections.Generic.List[string]]::new()
+    $observedCompletedFiles = 0
+    & $robocopy.Source @arguments 2>&1 | ForEach-Object {
+        $outputLine = [string]$_
+        [void]$robocopyOutput.Add($outputLine)
+        if ($robocopyOutput.Count -gt 20) {
+            $robocopyOutput.RemoveAt(0)
+        }
+
+        if ($TotalFileCount -gt 0 -and
+            $observedCompletedFiles -lt $FileName.Count -and
+            $outputLine.Trim() -match '^100(?:[.,]0+)?%$') {
+            $observedCompletedFiles++
+            $overallCompletedFiles = [Math]::Min(
+                $CompletedFileCount + $observedCompletedFiles,
+                $TotalFileCount
+            )
+            $estimatedBatchBytes = [long][Math]::Round(
+                $BatchByteCount * ($observedCompletedFiles / [double]$FileName.Count)
+            )
+            $overallCompletedBytes = [Math]::Min(
+                $CompletedByteCount + $estimatedBatchBytes,
+                $TotalByteCount
+            )
+            $percentComplete = [int][Math]::Floor(($overallCompletedFiles * 100.0) / $TotalFileCount)
+            $status = Get-AsiToPixCalibrationRobocopyProgressStatus `
+                -CompletedFileCount $overallCompletedFiles `
+                -TotalFileCount $TotalFileCount `
+                -CompletedByteCount $overallCompletedBytes `
+                -Elapsed $CopyStopwatch.Elapsed `
+                -ThreadCount $ThreadCount
+            Write-Progress `
+                -Activity "Copying calibration frames from NAS" `
+                -Status $status `
+                -PercentComplete $percentComplete
+        }
+    }
+
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ge 8) {
+        $details = @($robocopyOutput | Select-Object -Last 10) -join [Environment]::NewLine
+        throw "Robocopy failed with exit code $exitCode while copying from '$SourceDirectory' to '$DestinationDirectory'. $details"
+    }
+}
+
+function Invoke-AsiToPixCalibrationRobocopyImport {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [object[]]$Entry,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CalibrationRoot,
+
+        [ValidateRange(1, 16)]
+        [int]$ThreadCount = 4
+    )
+
+    $stagingName = ".asitopix-calibration-import-$([guid]::NewGuid().ToString('N'))"
+    $stagingRoot = Join-Path -Path $CalibrationRoot -ChildPath $stagingName
+    New-Item -ItemType Directory -Path $stagingRoot -ErrorAction Stop | Out-Null
+    $batchSize = 16
+    $totalFiles = $Entry.Count
+    $totalBytes = [long](($Entry | Measure-Object -Property SourceLength -Sum).Sum)
+    $copiedFiles = 0
+    $copiedBytes = [long]0
+    $batchNumber = 0
+    $copyStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $completedEntries = [System.Collections.Generic.List[object]]::new()
+
+    try {
+        foreach ($sourceGroup in $Entry | Group-Object { Split-Path -Path $_.SourcePath -Parent }) {
+            $groupItems = @($sourceGroup.Group)
+            for ($offset = 0; $offset -lt $groupItems.Count; $offset += $batchSize) {
+                $batchNumber++
+                $lastIndex = [Math]::Min($offset + $batchSize - 1, $groupItems.Count - 1)
+                $batchItems = @($groupItems[$offset..$lastIndex])
+                $batchBytes = [long](($batchItems | Measure-Object -Property SourceLength -Sum).Sum)
+                $batchStagingRoot = Join-Path -Path $stagingRoot -ChildPath ("batch-{0:0000}" -f $batchNumber)
+                New-Item -ItemType Directory -Path $batchStagingRoot -ErrorAction Stop | Out-Null
+
+                Invoke-AsiToPixCalibrationRobocopyBatch `
+                    -SourceDirectory $sourceGroup.Name `
+                    -DestinationDirectory $batchStagingRoot `
+                    -FileName @($batchItems | ForEach-Object { Split-Path -Path $_.SourcePath -Leaf }) `
+                    -ThreadCount $ThreadCount `
+                    -CompletedFileCount $copiedFiles `
+                    -TotalFileCount $totalFiles `
+                    -CompletedByteCount $copiedBytes `
+                    -BatchByteCount $batchBytes `
+                    -TotalByteCount $totalBytes `
+                    -CopyStopwatch $copyStopwatch
+
+                foreach ($item in $batchItems) {
+                    $fileName = Split-Path -Path $item.SourcePath -Leaf
+                    $stagedFile = Join-Path -Path $batchStagingRoot -ChildPath $fileName
+                    if (-not (Test-Path -LiteralPath $stagedFile -PathType Leaf)) {
+                        throw "Robocopy did not create the expected staged file: '$stagedFile'."
+                    }
+
+                    $stagedFileInfo = Get-Item -LiteralPath $stagedFile -ErrorAction Stop
+                    if ($stagedFileInfo.Length -ne $item.SourceLength) {
+                        throw "Staged file size mismatch for '$stagedFile': expected $($item.SourceLength) byte(s), got $($stagedFileInfo.Length)."
+                    }
+                    if (Test-Path -LiteralPath $item.DestinationPath) {
+                        throw "Destination path appeared during import and will not be overwritten: $($item.DestinationPath)"
+                    }
+
+                    Move-Item -LiteralPath $stagedFile -Destination $item.DestinationPath -ErrorAction Stop
+                    $completedEntries.Add($item)
+                }
+
+                Remove-Item -LiteralPath $batchStagingRoot -Force -ErrorAction Stop
+                $copiedFiles += $batchItems.Count
+                $copiedBytes += $batchBytes
+                $percentComplete = [int][Math]::Floor(($copiedFiles * 100.0) / $totalFiles)
+                $status = Get-AsiToPixCalibrationRobocopyProgressStatus `
+                    -CompletedFileCount $copiedFiles `
+                    -TotalFileCount $totalFiles `
+                    -CompletedByteCount $copiedBytes `
+                    -Elapsed $copyStopwatch.Elapsed `
+                    -ThreadCount $ThreadCount
+                Write-Progress `
+                    -Activity "Copying calibration frames from NAS" `
+                    -Status $status `
+                    -PercentComplete $percentComplete
+            }
+        }
+
+        return @($completedEntries)
+    } catch {
+        throw "Fast NAS calibration copy failed. Recoverable staged files, if any, remain under '$stagingRoot'. $($_.Exception.Message)"
+    } finally {
+        $copyStopwatch.Stop()
+        Write-Progress -Activity "Copying calibration frames from NAS" -Completed
+        if (Test-Path -LiteralPath $stagingRoot -PathType Container) {
+            $remainingItems = @(Get-ChildItem -LiteralPath $stagingRoot -Force -ErrorAction Stop)
+            if ($remainingItems.Count -eq 0) {
+                Remove-Item -LiteralPath $stagingRoot -Force -ErrorAction Stop
+            }
+        }
+    }
+}
+
 function Invoke-AsiToPixCalibrationImportPlan {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
@@ -744,7 +1255,7 @@ function Invoke-AsiToPixCalibrationImportPlan {
         [object]$Plan
     )
 
-    $copiedCount = 0
+    $approvedEntries = [System.Collections.Generic.List[object]]::new()
     $whatIfCount = 0
     foreach ($entry in @($Plan.Entries | Where-Object { $_.Status -eq "Planned" })) {
         if (-not $PSCmdlet.ShouldProcess(
@@ -755,36 +1266,74 @@ function Invoke-AsiToPixCalibrationImportPlan {
             continue
         }
 
-        try {
+        $approvedEntries.Add($entry)
+    }
+
+    $preparedDirectories = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($entry in $approvedEntries) {
+        if ($preparedDirectories.Add($entry.DestinationFolder)) {
             if (Test-Path -LiteralPath $entry.DestinationFolder) {
                 if (-not (Test-Path -LiteralPath $entry.DestinationFolder -PathType Container)) {
-                    throw "Destination folder path is occupied by a non-directory item."
+                    throw "Calibration destination folder path is occupied by a non-directory item: $($entry.DestinationFolder)"
                 }
             } else {
                 New-Item -ItemType Directory -Path $entry.DestinationFolder -Force -ErrorAction Stop | Out-Null
             }
+        }
 
-            if (Test-Path -LiteralPath $entry.DestinationPath) {
-                throw "Destination file appeared after planning; refusing to overwrite it."
-            }
-
-            Copy-Item `
-                -LiteralPath $entry.SourcePath `
-                -Destination $entry.DestinationPath `
-                -ErrorAction Stop
-            $copiedCount++
-            Write-Host "  [+] $(Split-Path -Path $entry.SourcePath -Leaf) -> $($entry.DestinationFolder)" `
-                -ForegroundColor Green
-        } catch {
-            throw "Failed to copy calibration file '$($entry.SourcePath)' to '$($entry.DestinationPath)': $($_.Exception.Message)"
+        if (Test-Path -LiteralPath $entry.DestinationPath) {
+            throw "Calibration destination file appeared after planning and will not be overwritten: $($entry.DestinationPath)"
         }
     }
 
+    $copyEngine = "CopyItem"
+    $completedEntries = @()
+    if ($approvedEntries.Count -gt 0) {
+        if (Test-AsiToPixCalibrationUseRobocopy `
+            -Entry @($approvedEntries) `
+            -DestinationRoot $Plan.CalibrationRoot) {
+            $copyEngine = "Robocopy"
+            Write-Host "[INFO] Same-share NAS calibration copy detected; using Robocopy /J /MT:4 with safe staging." `
+                -ForegroundColor Cyan
+            $completedEntries = @(
+                Invoke-AsiToPixCalibrationRobocopyImport `
+                    -Entry @($approvedEntries) `
+                    -CalibrationRoot $Plan.CalibrationRoot `
+                    -ThreadCount 4
+            )
+        } else {
+            $completedEntries = @(
+                foreach ($entry in $approvedEntries) {
+                    try {
+                        if (Test-Path -LiteralPath $entry.DestinationPath) {
+                            throw "Destination file appeared after planning; refusing to overwrite it."
+                        }
+                        Copy-Item `
+                            -LiteralPath $entry.SourcePath `
+                            -Destination $entry.DestinationPath `
+                            -ErrorAction Stop
+                        $entry
+                    } catch {
+                        throw "Failed to copy calibration file '$($entry.SourcePath)' to '$($entry.DestinationPath)': $($_.Exception.Message)"
+                    }
+                }
+            )
+        }
+    }
+
+    foreach ($entry in $completedEntries) {
+        Write-Host "  [+] $(Split-Path -Path $entry.SourcePath -Leaf) -> $($entry.DestinationFolder)" `
+            -ForegroundColor Green
+    }
+
     return [PSCustomObject]@{
-        CopiedCount   = $copiedCount
+        CopiedCount   = $completedEntries.Count
         ExistingCount = $Plan.ExistingCount
         ConflictCount = $Plan.ConflictCount
         WhatIfCount   = $whatIfCount
+        CopyEngine    = $copyEngine
     }
 }
 
@@ -807,12 +1356,14 @@ function Import-AsiToPixCalibration {
 
         [string]$FilterName = "",
 
-        [string]$AngleDegrees = ""
+        [string]$AngleDegrees = "",
+
+        [switch]$SkipConfirmation
     )
 
     $resolvedSourcePath = (Resolve-Path -LiteralPath $SourcePath).ProviderPath
     $resolvedCalibrationRoot = (Resolve-Path -LiteralPath $CalibrationRoot).ProviderPath
-    $setupName = Split-Path -Path $resolvedSourcePath -Leaf
+    $setupName = Get-AsiToPixCalibrationSetupName -SourcePath $resolvedSourcePath
     $records = @(Get-AsiToPixCalibrationSourceRecord -SourcePath $resolvedSourcePath)
 
     Write-Host "`nSource setup: $setupName" -ForegroundColor Cyan
@@ -902,6 +1453,7 @@ function Import-AsiToPixCalibration {
     }
 
     if (-not $WhatIfPreference -and
+        -not $SkipConfirmation -and
         -not (Read-AsiToPixCalibrationConfirmation -Prompt "Copy $($plan.PlannedCount) new calibration file(s)?")) {
         Write-Host "[INFO] Calibration import cancelled." -ForegroundColor Yellow
         return [PSCustomObject]@{
@@ -927,7 +1479,9 @@ function Import-AsiToPixCalibration {
 
 Export-ModuleMember -Function `
     ConvertFrom-AsiToPixCalibrationFileName, `
+    Find-AsiToPixCalibrationImportFolder, `
     Get-AsiToPixCalibrationImportPlan, `
     Import-AsiToPixCalibration, `
     Invoke-AsiToPixCalibrationImportPlan, `
+    Read-AsiToPixCalibrationConfirmation, `
     Test-AsiToPixSupportedCalibrationFileName

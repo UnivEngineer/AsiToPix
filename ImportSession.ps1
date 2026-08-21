@@ -28,7 +28,8 @@ Import-Module $importModule -Force
 
 Write-Host "--- ASIAir SESSION IMPORT ---" -ForegroundColor Cyan
 
-if ([string]::IsNullOrWhiteSpace($SourcePath)) {
+$sourcePathWasProvided = -not [string]::IsNullOrWhiteSpace($SourcePath)
+if (-not $sourcePathWasProvided) {
     $SourcePath = (Read-Host "Enter light folder path, supported image file, or import object name").Trim('"')
 }
 
@@ -43,7 +44,11 @@ if (-not (Test-Path -LiteralPath $AstroPhotoRoot -PathType Container)) {
     exit 1
 }
 
-$sourceResolution = Resolve-AsiToPixImportSourcePath -SourcePath $SourcePath -AstroPhotoRoot $AstroPhotoRoot
+$sourceResolution = if ($sourcePathWasProvided) {
+    Resolve-AsiToPixImportSourcePath -SourcePath $SourcePath -AstroPhotoRoot $AstroPhotoRoot
+} else {
+    Read-AsiToPixImportSource -InitialValue $SourcePath -AstroPhotoRoot $AstroPhotoRoot
+}
 $SourcePath = $sourceResolution.SourcePath
 if (-not [string]::IsNullOrWhiteSpace($sourceResolution.AstroPhotoRoot)) {
     $AstroPhotoRoot = $sourceResolution.AstroPhotoRoot

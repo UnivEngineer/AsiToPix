@@ -1,5 +1,7 @@
 $modulePath = Join-Path -Path $PSScriptRoot -ChildPath "..\src\AsiToPix.ExportMasters.psm1"
 Import-Module $modulePath -Force
+$entryScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "..\ExportMasters.ps1"
+$entryScriptText = Get-Content -LiteralPath $entryScriptPath -Raw
 
 Describe "WBPP master filename parsing" {
     It "removes WBPP metadata tags from a dark master name" {
@@ -38,6 +40,11 @@ Describe "WBPP master filename parsing" {
 }
 
 Describe "Processing project metadata discovery" {
+    It "discovers every Astro and AstroPhoto Processing root from the entry point" {
+        $entryScriptText | Should Match 'Get-AsiToPixAstroRootChildCandidate -ChildPath "Processing"'
+        $entryScriptText | Should Match '\$metadataPathParameters\.ProcessingRoot = \$processingRoots'
+    }
+
     It "fuzzy-resolves an object name to its only processing project" {
         $processingRoot = Join-Path -Path $TestDrive -ChildPath "single-processing\AstroPhoto\Processing"
         $projectPath = Join-Path -Path $processingRoot -ChildPath "NGC 7293 - Helix nebula\2026_APO120_ASI2600MM"
@@ -55,6 +62,35 @@ Describe "Processing project metadata discovery" {
         $candidates.Count | Should Be 1
         $candidates[0].ObjectName | Should Be "NGC 7293 - Helix nebula"
         $resolvedPath | Should Be $metadataPath
+    }
+
+    It "fuzzy-resolves an object name across multiple Processing roots" {
+        $astroPhotoProcessingRoot = Join-Path -Path $TestDrive -ChildPath "all-processing\first\AstroPhoto\Processing"
+        $astroProcessingRoot = Join-Path -Path $TestDrive -ChildPath "all-processing\second\Astro\Processing"
+        $firstProject = Join-Path -Path $astroPhotoProcessingRoot -ChildPath "M 31 - Andromeda galaxy\2025_Setup"
+        $secondProject = Join-Path -Path $astroProcessingRoot -ChildPath "NGC 224 (Andromeda galaxy)\2026_Setup"
+        foreach ($projectPath in @($firstProject, $secondProject)) {
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $projectPath "project_meta.json") -Value "{}" -NoNewline
+        }
+        $selectionReader = {
+            param($Prompt)
+            $null = $Prompt
+            return "2"
+        }
+
+        $processingRoots = @($astroPhotoProcessingRoot, $astroProcessingRoot)
+        $candidates = @(Find-AsiToPixProcessingProjectMetadata `
+            -ProcessingRoot $processingRoots `
+            -ObjectName "Andromeda")
+        $resolvedPath = Resolve-AsiToPixProjectMetadataPath `
+            -InputValue "Andromeda" `
+            -ProcessingRoot $processingRoots `
+            -SelectionReader $selectionReader
+
+        $candidates.Count | Should Be 2
+        @($candidates.ProcessingRoot | Sort-Object -Unique).Count | Should Be 2
+        $resolvedPath | Should Be (Join-Path $secondProject "project_meta.json")
     }
 
     It "lists only exact catalog matches and accepts a one-based project index" {
@@ -307,6 +343,119 @@ Describe "Master export planning" {
         $planned.Count | Should Be 1
         $planned[0].DestinationPath | Should Be (Join-Path $destinationFolder "masterDark_BIN-1_6248x4176.xisf")
         $plan.SourceRecordCount | Should Be 1
+    }
+
+    It "infers missing bias and dark filename tags from unambiguous CalibrationSources metadata" {
+        $pixPath = Join-Path -Path $TestDrive -ChildPath "metadata-fallback-project\Pix"
+        $masterPath = Join-Path -Path $pixPath -ChildPath "master"
+        New-Item -ItemType Directory -Path $masterPath -Force | Out-Null
+
+        Set-Content `
+            -LiteralPath (Join-Path $masterPath "masterBias_BIN-1_6248x4176.xisf") `
+            -Value "metadata bias" `
+            -NoNewline
+        Set-Content `
+            -LiteralPath (Join-Path $masterPath "masterDark_BIN-1_6248x4176_EXPOSURE-60.00s.xisf") `
+            -Value "metadata dark" `
+            -NoNewline
+
+        $cameraRoot = Join-Path -Path $TestDrive -ChildPath "Calibration\ASI2600MC"
+        $biasDestination = Join-Path -Path $cameraRoot -ChildPath "Master\biases\Gain120\-10C\26.07"
+        $darkDestination = Join-Path -Path $cameraRoot -ChildPath "Master\darks\Gain120\-10C\60sec\25.10"
+        $metadata = [PSCustomObject]@{
+            SchemaVersion = 2
+            PixPath = $pixPath
+            WbppMasterPath = $masterPath
+            ProjectSourcePath = Join-Path -Path $TestDrive -ChildPath "missing-project-source"
+            Scope = "APO120 @ 0.8x"
+            Cameras = @([PSCustomObject]@{
+                Name = "ASI2600MC"
+                CalibrationFolders = [PSCustomObject]@{
+                    Biases = Join-Path -Path $cameraRoot -ChildPath "Master\biases"
+                    Darks = Join-Path -Path $cameraRoot -ChildPath "Master\darks"
+                }
+            })
+            CalibrationSources = @(
+                [PSCustomObject]@{
+                    Type = "Biases"
+                    Camera = "ASI2600MC"
+                    SourcePath = Join-Path -Path $cameraRoot -ChildPath "Source\biases\Gain120\-10C\26.07"
+                    DestinationFolder = $biasDestination
+                    Gain = "120"
+                    TemperatureC = "-10"
+                    ExposureSeconds = $null
+                    Filter = "RGB"
+                    Tag = "bias metadata"
+                },
+                [PSCustomObject]@{
+                    Type = "Darks"
+                    Camera = "ASI2600MC"
+                    SourcePath = Join-Path -Path $cameraRoot -ChildPath "Source\darks\Gain120\-10C\60sec\25.10"
+                    DestinationFolder = $darkDestination
+                    Gain = "120"
+                    TemperatureC = "-10"
+                    ExposureSeconds = "60"
+                    Filter = "RGB"
+                    Tag = "dark metadata"
+                }
+            )
+        }
+
+        $plan = Get-AsiToPixMasterExportPlan -Metadata $metadata
+        $planned = @($plan.Entries | Where-Object { $_.Status -eq "Planned" })
+
+        $planned.Count | Should Be 2
+        @($planned | Where-Object {
+            $_.DestinationPath -eq (Join-Path $biasDestination "masterBias_BIN-1_6248x4176.xisf")
+        }).Count | Should Be 1
+        @($planned | Where-Object {
+            $_.DestinationPath -eq (Join-Path $darkDestination "masterDark_BIN-1_6248x4176.xisf")
+        }).Count | Should Be 1
+        @($plan.Entries | Where-Object { $_.Status -in @("Skipped", "Conflict") }).Count | Should Be 0
+    }
+
+    It "does not infer missing bias filename tags when metadata has multiple destinations" {
+        $pixPath = Join-Path -Path $TestDrive -ChildPath "ambiguous-bias-project\Pix"
+        $masterPath = Join-Path -Path $pixPath -ChildPath "master"
+        New-Item -ItemType Directory -Path $masterPath -Force | Out-Null
+        Set-Content `
+            -LiteralPath (Join-Path $masterPath "masterBias_BIN-1_6248x4176.xisf") `
+            -Value "ambiguous bias" `
+            -NoNewline
+
+        $metadata = [PSCustomObject]@{
+            PixPath = $pixPath
+            Scope = "APO120 @ 0.8x"
+            Cameras = @([PSCustomObject]@{ Name = "ASI2600MC" })
+        }
+        $sourceRecords = @(
+            [PSCustomObject]@{
+                Category = "Biases"
+                Camera = "ASI2600MC"
+                Gain = "100"
+                Temperature = "-10"
+                Exposure = $null
+                Filter = $null
+                DestinationFolder = Join-Path -Path $TestDrive -ChildPath "Calibration\ASI2600MC\Master\biases\Gain100\-10C\26.07"
+            },
+            [PSCustomObject]@{
+                Category = "Biases"
+                Camera = "ASI2600MC"
+                Gain = "120"
+                Temperature = "-10"
+                Exposure = $null
+                Filter = $null
+                DestinationFolder = Join-Path -Path $TestDrive -ChildPath "Calibration\ASI2600MC\Master\biases\Gain120\-10C\26.07"
+            }
+        )
+
+        $plan = Get-AsiToPixMasterExportPlan -Metadata $metadata -SourceRecord $sourceRecords
+        $conflicts = @($plan.Entries | Where-Object { $_.Status -eq "Conflict" })
+
+        $conflicts.Count | Should Be 1
+        $conflicts[0].DestinationPath | Should BeNullOrEmpty
+        $conflicts[0].Reason | Should Match "multiple destination folders"
+        $conflicts[0].Reason | Should Match "missing GAIN, TEMP"
     }
 
     It "uses project source mapping instead of an exposure threshold for dark classification" {

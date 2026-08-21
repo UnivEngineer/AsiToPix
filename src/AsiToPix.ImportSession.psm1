@@ -1,5 +1,8 @@
 Set-StrictMode -Version Latest
 
+$pathsModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.Paths.psm1"
+Import-Module $pathsModule -Force
+
 $imageFilesModule = Join-Path -Path $PSScriptRoot -ChildPath "AsiToPix.ImageFiles.psm1"
 Import-Module $imageFilesModule -Force
 
@@ -698,39 +701,62 @@ function Get-AsiToPixFileNameSet {
     return ,$set
 }
 
-function Find-AsiToPixImportSession {
+function Get-AsiToPixImportObjectFolder {
     param(
         [Parameter(Mandatory = $true)]
         [string]$ImportRoot
     )
 
     $resolvedImportRoot = (Resolve-Path -LiteralPath $ImportRoot).ProviderPath
-    $sessions = @()
 
     foreach ($setupFolder in Get-ChildItem -LiteralPath $resolvedImportRoot -Directory -ErrorAction Stop) {
         $lightFolders = @(Get-AsiToPixChildFrameFolder -Path $setupFolder.FullName -Kind Light)
 
         foreach ($lightFolder in $lightFolders) {
-            $objectFolders = @(Get-ChildItem -LiteralPath $lightFolder.FullName -Directory -ErrorAction Stop)
-
-            foreach ($objectFolder in $objectFolders) {
-                $files = @(Get-AsiToPixSourceLightFile -SourcePath $objectFolder.FullName)
-                if ($files.Count -eq 0) {
-                    continue
-                }
-
-                $sessions += [PSCustomObject]@{
+            foreach ($objectFolder in Get-ChildItem -LiteralPath $lightFolder.FullName -Directory -ErrorAction Stop) {
+                [PSCustomObject]@{
                     SourcePath        = $objectFolder.FullName
                     SetupSourcePath   = $setupFolder.FullName
                     DetectedSetupName = $setupFolder.Name
                     DetectedObject    = $objectFolder.Name
-                    FileCount         = $files.Count
                 }
             }
         }
     }
+}
 
-    return @($sessions | Sort-Object DetectedSetupName, DetectedObject, SourcePath)
+function ConvertTo-AsiToPixImportSession {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$ObjectFolder
+    )
+
+    $files = @(Get-AsiToPixSourceLightFile -SourcePath $ObjectFolder.SourcePath)
+    if ($files.Count -eq 0) {
+        return $null
+    }
+
+    return [PSCustomObject]@{
+        SourcePath        = $ObjectFolder.SourcePath
+        SetupSourcePath   = $ObjectFolder.SetupSourcePath
+        DetectedSetupName = $ObjectFolder.DetectedSetupName
+        DetectedObject    = $ObjectFolder.DetectedObject
+        FileCount         = $files.Count
+    }
+}
+
+function Find-AsiToPixImportSession {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ImportRoot
+    )
+
+    $sessions = foreach ($objectFolder in Get-AsiToPixImportObjectFolder -ImportRoot $ImportRoot) {
+        ConvertTo-AsiToPixImportSession -ObjectFolder $objectFolder
+    }
+
+    return @($sessions | Where-Object { $null -ne $_ } |
+        Sort-Object DetectedSetupName, DetectedObject, SourcePath)
 }
 
 function Get-AsiToPixDefaultImportRoot {
@@ -749,13 +775,7 @@ function Get-AsiToPixDefaultImportRoot {
         return @($roots | Sort-Object -Unique)
     }
 
-    foreach ($drive in Get-PSDrive -PSProvider FileSystem) {
-        $astroPhotoPath = Join-Path -Path $drive.Root -ChildPath "AstroPhoto"
-        $importPath = Join-Path -Path $astroPhotoPath -ChildPath "Import"
-        if (Test-Path -LiteralPath $importPath -PathType Container -ErrorAction SilentlyContinue) {
-            $roots += (Resolve-Path -LiteralPath $importPath -ErrorAction Stop).ProviderPath
-        }
-    }
+    $roots += @(Get-AsiToPixAstroRootChildCandidate -ChildPath "Import")
 
     return @($roots | Sort-Object -Unique)
 }
@@ -789,26 +809,35 @@ function Resolve-AsiToPixImportSourcePath {
 
     $importRoots = @(Get-AsiToPixDefaultImportRoot -AstroPhotoRoot $AstroPhotoRoot)
     if ($importRoots.Count -eq 0) {
-        throw "No Import folder found by pattern *:\AstroPhoto\Import. Enter a full source path instead of object name '$resolvedInput'."
+        throw "No Import folder found by patterns *:\AstroPhoto\Import and *:\Astro\Import. Enter a full source path instead of object name '$resolvedInput'."
     }
 
-    $sessions = foreach ($importRoot in $importRoots) {
-        Find-AsiToPixImportSession -ImportRoot $importRoot
+    $objectFolders = foreach ($importRoot in $importRoots) {
+        Get-AsiToPixImportObjectFolder -ImportRoot $importRoot
     }
-    $sessions = @($sessions)
-    if ($sessions.Count -eq 0) {
+    $objectFolders = @($objectFolders)
+    if ($objectFolders.Count -eq 0) {
         throw "No import sessions with supported light files found under Import folder(s): $($importRoots -join ', ')"
     }
 
-    $objectNames = @($sessions | Select-Object -ExpandProperty DetectedObject -Unique)
+    $objectNames = @($objectFolders | Select-Object -ExpandProperty DetectedObject -Unique)
     $objectMatches = @(Get-AsiToPixNameMatch -DetectedName $resolvedInput -Candidates $objectNames)
     if ($objectMatches.Count -eq 0) {
         throw "No import object folder matching '$resolvedInput' found under Import folder(s): $($importRoots -join ', ')"
     }
 
     $matchedNames = @($objectMatches | Select-Object -ExpandProperty Name)
+    $sessions = foreach ($objectFolder in $objectFolders) {
+        if ($matchedNames -contains $objectFolder.DetectedObject) {
+            ConvertTo-AsiToPixImportSession -ObjectFolder $objectFolder
+        }
+    }
+    $sessions = @($sessions | Where-Object { $null -ne $_ })
+    if ($sessions.Count -eq 0) {
+        throw "No import sessions with supported light files matching '$resolvedInput' found under Import folder(s): $($importRoots -join ', ')"
+    }
+
     $candidateSessions = @($sessions |
-        Where-Object { $matchedNames -contains $_.DetectedObject } |
         Sort-Object @{ Expression = { [array]::IndexOf($matchedNames, $_.DetectedObject) } }, DetectedSetupName, SourcePath)
 
     if ($candidateSessions.Count -eq 1) {
@@ -859,6 +888,49 @@ function Resolve-AsiToPixImportSourcePath {
     return [PSCustomObject]@{
         SourcePath     = $selected.SourcePath
         AstroPhotoRoot = $selectedAstroPhotoRoot
+    }
+}
+
+function Read-AsiToPixImportSource {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$InitialValue,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AstroPhotoRoot,
+
+        [scriptblock]$InputReader = {
+            param($Prompt)
+            Read-Host $Prompt
+        }
+    )
+
+    $currentValue = $InitialValue.Trim().Trim('"')
+    while ($true) {
+        $failureMessage = ""
+        try {
+            $sourceResolution = Resolve-AsiToPixImportSourcePath `
+                -SourcePath $currentValue `
+                -AstroPhotoRoot $AstroPhotoRoot
+            if (Test-Path -LiteralPath $sourceResolution.SourcePath -PathType Container) {
+                return $sourceResolution
+            }
+
+            $failureMessage = "Source folder not found: $($sourceResolution.SourcePath)"
+        } catch {
+            $failureMessage = $_.Exception.Message
+        }
+
+        Write-Host "[!] $failureMessage" -ForegroundColor Red
+        $answerValue = & $InputReader "Enter light folder path, supported image file, or import object name"
+        if ($null -eq $answerValue) {
+            throw "Source input ended before a valid light folder or import object was entered."
+        }
+
+        $currentValue = ([string]$answerValue).Trim().Trim('"')
     }
 }
 
@@ -1066,6 +1138,330 @@ function Show-AsiToPixImportPlan {
     }
 }
 
+function Get-AsiToPixUncShareKey {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if ($Path -notmatch '^[\\/]{2}(?<server>[^\\/]+)[\\/](?<share>[^\\/]+)') {
+        return ""
+    }
+
+    return "\\$($Matches['server'].ToLowerInvariant())\$($Matches['share'].ToLowerInvariant())"
+}
+
+function Get-AsiToPixNetworkLocationKey {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $uncShareKey = Get-AsiToPixUncShareKey -Path $Path
+    if (-not [string]::IsNullOrWhiteSpace($uncShareKey)) {
+        return $uncShareKey
+    }
+
+    $pathRoot = [System.IO.Path]::GetPathRoot($Path)
+    if ([string]::IsNullOrWhiteSpace($pathRoot) -or $pathRoot -notmatch '^(?<drive>[A-Za-z]):[\\/]$') {
+        return ""
+    }
+
+    $driveName = $Matches['drive'].ToUpperInvariant()
+    $drive = Get-PSDrive -Name $driveName -PSProvider FileSystem -ErrorAction SilentlyContinue
+    if ($null -ne $drive) {
+        $displayRootProperty = $drive.PSObject.Properties['DisplayRoot']
+        if ($null -ne $displayRootProperty -and
+            -not [string]::IsNullOrWhiteSpace([string]$displayRootProperty.Value)) {
+            $mappedShareKey = Get-AsiToPixUncShareKey -Path ([string]$displayRootProperty.Value)
+            if (-not [string]::IsNullOrWhiteSpace($mappedShareKey)) {
+                return $mappedShareKey
+            }
+        }
+    }
+
+    try {
+        $driveInfo = [System.IO.DriveInfo]::new("${driveName}:\")
+        if ($driveInfo.DriveType -eq [System.IO.DriveType]::Network) {
+            return "drive:$driveName"
+        }
+    } catch {
+        return ""
+    }
+
+    return ""
+}
+
+function Test-AsiToPixUseRobocopy {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$WorkItem,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationRoot
+    )
+
+    if ($WorkItem.Count -eq 0 -or
+        $null -eq (Get-Command robocopy.exe -CommandType Application -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+
+    $destinationKey = Get-AsiToPixNetworkLocationKey -Path $DestinationRoot
+    if ([string]::IsNullOrWhiteSpace($destinationKey)) {
+        return $false
+    }
+
+    foreach ($item in $WorkItem) {
+        $sourceKey = Get-AsiToPixNetworkLocationKey -Path $item.Entry.File.FullName
+        if ([string]::IsNullOrWhiteSpace($sourceKey) -or
+            -not $sourceKey.Equals($destinationKey, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Get-AsiToPixImportWorkItemLength {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$WorkItem
+    )
+
+    $lengthProperty = $WorkItem.Entry.File.PSObject.Properties['Length']
+    if ($null -ne $lengthProperty) {
+        return [long]$lengthProperty.Value
+    }
+
+    return [long](Get-Item -LiteralPath $WorkItem.Entry.File.FullName -ErrorAction Stop).Length
+}
+
+function Get-AsiToPixRobocopyProgressStatus {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$CompletedFileCount,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TotalFileCount,
+
+        [Parameter(Mandatory = $true)]
+        [long]$CompletedByteCount,
+
+        [Parameter(Mandatory = $true)]
+        [timespan]$Elapsed,
+
+        [Parameter(Mandatory = $true)]
+        [int]$ThreadCount
+    )
+
+    $percentComplete = [int][Math]::Floor(($CompletedFileCount * 100.0) / $TotalFileCount)
+    $elapsedSeconds = [Math]::Max($Elapsed.TotalSeconds, 0.001)
+    $megabytesPerSecond = ($CompletedByteCount / 1MB) / $elapsedSeconds
+    $elapsedText = "{0:00}:{1:00}:{2:00}" -f [Math]::Floor($Elapsed.TotalHours), $Elapsed.Minutes, $Elapsed.Seconds
+
+    return "$CompletedFileCount/$TotalFileCount files ($percentComplete%), " +
+        ("{0:0.0} MB/s avg, elapsed {1} (Robocopy /MT:{2})" -f $megabytesPerSecond, $elapsedText, $ThreadCount)
+}
+
+function Invoke-AsiToPixRobocopyBatch {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateCount(1, 64)]
+        [string[]]$FileName,
+
+        [ValidateRange(1, 16)]
+        [int]$ThreadCount = 4,
+
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$CompletedFileCount = 0,
+
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$TotalFileCount = 0,
+
+        [ValidateRange(0, [long]::MaxValue)]
+        [long]$CompletedByteCount = 0,
+
+        [ValidateRange(0, [long]::MaxValue)]
+        [long]$BatchByteCount = 0,
+
+        [ValidateRange(0, [long]::MaxValue)]
+        [long]$TotalByteCount = 0,
+
+        [System.Diagnostics.Stopwatch]$CopyStopwatch
+    )
+
+    $robocopy = Get-Command robocopy.exe -CommandType Application -ErrorAction Stop
+    $arguments = @(
+        $SourceDirectory,
+        $DestinationDirectory
+    ) + $FileName + @(
+        "/J",
+        "/MT:$ThreadCount",
+        "/R:2",
+        "/W:1",
+        "/COPY:DAT",
+        "/DCOPY:DA",
+        "/NDL",
+        "/NJH",
+        "/NJS"
+    )
+
+    # Consume Robocopy's noisy multithreaded output and turn file completions into one stable progress bar.
+    $robocopyOutput = [System.Collections.Generic.List[string]]::new()
+    $observedCompletedFiles = 0
+    & $robocopy.Source @arguments 2>&1 | ForEach-Object {
+        $outputLine = [string]$_
+        [void]$robocopyOutput.Add($outputLine)
+        if ($robocopyOutput.Count -gt 20) {
+            $robocopyOutput.RemoveAt(0)
+        }
+
+        if ($TotalFileCount -gt 0 -and
+            $observedCompletedFiles -lt $FileName.Count -and
+            $outputLine.Trim() -match '^100(?:[.,]0+)?%$') {
+            $observedCompletedFiles++
+            $overallCompletedFiles = [Math]::Min(
+                $CompletedFileCount + $observedCompletedFiles,
+                $TotalFileCount
+            )
+            $estimatedBatchBytes = [long][Math]::Round(
+                $BatchByteCount * ($observedCompletedFiles / [double]$FileName.Count)
+            )
+            $overallCompletedBytes = [Math]::Min(
+                $CompletedByteCount + $estimatedBatchBytes,
+                $TotalByteCount
+            )
+            $percentComplete = [int][Math]::Floor(($overallCompletedFiles * 100.0) / $TotalFileCount)
+            $status = Get-AsiToPixRobocopyProgressStatus `
+                -CompletedFileCount $overallCompletedFiles `
+                -TotalFileCount $TotalFileCount `
+                -CompletedByteCount $overallCompletedBytes `
+                -Elapsed $CopyStopwatch.Elapsed `
+                -ThreadCount $ThreadCount
+            Write-Progress `
+                -Activity "Copying lights from NAS" `
+                -Status $status `
+                -PercentComplete $percentComplete
+        }
+    }
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ge 8) {
+        $details = @($robocopyOutput | Select-Object -Last 10) -join [Environment]::NewLine
+        throw "Robocopy failed with exit code $exitCode while copying from '$SourceDirectory' to '$DestinationDirectory'. $details"
+    }
+}
+
+function Invoke-AsiToPixRobocopyImport {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [object[]]$WorkItem,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SetupPath,
+
+        [ValidateRange(1, 16)]
+        [int]$ThreadCount = 4
+    )
+
+    $stagingName = ".asitopix-import-$([guid]::NewGuid().ToString('N'))"
+    $stagingRoot = Join-Path -Path $SetupPath -ChildPath $stagingName
+    New-Item -ItemType Directory -Path $stagingRoot -ErrorAction Stop | Out-Null
+    $batchSize = 16
+    $totalFiles = $WorkItem.Count
+    $totalBytes = [long]0
+    foreach ($item in $WorkItem) {
+        $totalBytes += Get-AsiToPixImportWorkItemLength -WorkItem $item
+    }
+    $copiedFiles = 0
+    $copiedBytes = [long]0
+    $copyStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+    try {
+        foreach ($sourceGroup in $WorkItem | Group-Object SourceDirectory) {
+            $groupItems = @($sourceGroup.Group)
+            for ($offset = 0; $offset -lt $groupItems.Count; $offset += $batchSize) {
+                $lastIndex = [Math]::Min($offset + $batchSize - 1, $groupItems.Count - 1)
+                $batchItems = @($groupItems[$offset..$lastIndex])
+                $batchBytes = [long]0
+                foreach ($batchItem in $batchItems) {
+                    $batchBytes += Get-AsiToPixImportWorkItemLength -WorkItem $batchItem
+                }
+                Invoke-AsiToPixRobocopyBatch `
+                    -SourceDirectory $sourceGroup.Name `
+                    -DestinationDirectory $stagingRoot `
+                    -FileName @($batchItems | ForEach-Object { $_.Entry.File.Name }) `
+                    -ThreadCount $ThreadCount `
+                    -CompletedFileCount $copiedFiles `
+                    -TotalFileCount $totalFiles `
+                    -CompletedByteCount $copiedBytes `
+                    -BatchByteCount $batchBytes `
+                    -TotalByteCount $totalBytes `
+                    -CopyStopwatch $copyStopwatch
+
+                $copiedFiles += $batchItems.Count
+                $copiedBytes += $batchBytes
+                $percentComplete = [int][Math]::Floor(($copiedFiles * 100.0) / $totalFiles)
+                $status = Get-AsiToPixRobocopyProgressStatus `
+                    -CompletedFileCount $copiedFiles `
+                    -TotalFileCount $totalFiles `
+                    -CompletedByteCount $copiedBytes `
+                    -Elapsed $copyStopwatch.Elapsed `
+                    -ThreadCount $ThreadCount
+                Write-Progress `
+                    -Activity "Copying lights from NAS" `
+                    -Status $status `
+                    -PercentComplete $percentComplete
+            }
+        }
+
+        $completedItems = foreach ($item in $WorkItem) {
+            $stagedFile = Join-Path -Path $stagingRoot -ChildPath $item.Entry.File.Name
+            if (-not (Test-Path -LiteralPath $stagedFile -PathType Leaf)) {
+                throw "Robocopy did not create the expected staged file: '$stagedFile'."
+            }
+
+            $stagedFileInfo = Get-Item -LiteralPath $stagedFile -ErrorAction Stop
+            $sourceLengthProperty = $item.Entry.File.PSObject.Properties['Length']
+            $sourceLength = if ($null -ne $sourceLengthProperty) {
+                [long]$sourceLengthProperty.Value
+            } else {
+                [long](Get-Item -LiteralPath $item.Entry.File.FullName -ErrorAction Stop).Length
+            }
+            if ($stagedFileInfo.Length -ne $sourceLength) {
+                throw "Staged file size mismatch for '$stagedFile': expected $sourceLength byte(s), got $($stagedFileInfo.Length)."
+            }
+
+            if (Test-Path -LiteralPath $item.DestinationFile) {
+                throw "Destination path appeared during import and will not be overwritten: $($item.DestinationFile)"
+            }
+
+            Move-Item -LiteralPath $stagedFile -Destination $item.DestinationFile -ErrorAction Stop
+            $item
+        }
+
+        return @($completedItems)
+    } catch {
+        throw "Fast NAS copy failed. Recoverable staged files, if any, remain under '$stagingRoot'. $($_.Exception.Message)"
+    } finally {
+        $copyStopwatch.Stop()
+        Write-Progress -Activity "Copying lights from NAS" -Completed
+        if (Test-Path -LiteralPath $stagingRoot -PathType Container) {
+            $remainingItems = @(Get-ChildItem -LiteralPath $stagingRoot -Force -ErrorAction Stop)
+            if ($remainingItems.Count -eq 0) {
+                Remove-Item -LiteralPath $stagingRoot -Force -ErrorAction Stop
+            }
+        }
+    }
+}
+
 function Invoke-AsiToPixImportPlan {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
@@ -1086,6 +1482,11 @@ function Invoke-AsiToPixImportPlan {
     $imported = 0
     $skippedExisting = 0
     $skippedTrash = 0
+    $copyEngine = if ($Plan.ImportMode -eq "Symlink") { "Symlink" } else { "CopyItem" }
+    $copyWorkItems = [System.Collections.Generic.List[object]]::new()
+    $preparedDirectories = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
 
     foreach ($entry in $Plan.ParsedFiles) {
         $fileName = $entry.File.Name
@@ -1109,10 +1510,11 @@ function Invoke-AsiToPixImportPlan {
         $nightTrashPath = Join-Path -Path $filterTrashPath -ChildPath $destinationNightFolder
         $destinationFile = Join-Path -Path $nightGoodPath -ChildPath $fileName
 
-        New-AsiToPixDirectory -Path $filterGoodPath -Cmdlet $PSCmdlet
-        New-AsiToPixDirectory -Path $filterTrashPath -Cmdlet $PSCmdlet
-        New-AsiToPixDirectory -Path $nightGoodPath -Cmdlet $PSCmdlet
-        New-AsiToPixDirectory -Path $nightTrashPath -Cmdlet $PSCmdlet
+        foreach ($directoryPath in @($filterGoodPath, $filterTrashPath, $nightGoodPath, $nightTrashPath)) {
+            if ($preparedDirectories.Add($directoryPath)) {
+                New-AsiToPixDirectory -Path $directoryPath -Cmdlet $PSCmdlet
+            }
+        }
 
         if (Test-Path -LiteralPath $destinationFile) {
             throw "Destination path already exists and will not be overwritten: $destinationFile"
@@ -1126,18 +1528,48 @@ function Invoke-AsiToPixImportPlan {
                 } catch {
                     throw "Failed to create symbolic link '$destinationFile' -> '$($entry.File.FullName)': $($_.Exception.Message)"
                 }
-            } else {
-                try {
-                    Copy-Item -LiteralPath $entry.File.FullName -Destination $destinationFile -ErrorAction Stop
-                } catch {
-                    throw "Failed to copy '$($entry.File.FullName)' to '$destinationFile': $($_.Exception.Message)"
-                }
-            }
 
-            [void]$goodNames.Add($fileName)
+                [void]$goodNames.Add($fileName)
+                $imported++
+                Write-Host "  [link] $fileName -> $($entry.FilterName)\$destinationNightFolder" -ForegroundColor Green
+            } else {
+                $copyWorkItems.Add([PSCustomObject]@{
+                    Entry                  = $entry
+                    SourceDirectory        = Split-Path -Path $entry.File.FullName -Parent
+                    DestinationFile        = $destinationFile
+                    DestinationNightFolder = $destinationNightFolder
+                })
+
+                # Reserve the filename so duplicate source entries cannot be scheduled twice.
+                [void]$goodNames.Add($fileName)
+            }
+        }
+    }
+
+    if ($copyWorkItems.Count -gt 0) {
+        $completedItems = if (Test-AsiToPixUseRobocopy -WorkItem @($copyWorkItems) -DestinationRoot $Plan.SetupPath) {
+            $copyEngine = "Robocopy"
+            Write-Host "[INFO] Same-share NAS copy detected; using Robocopy /J /MT:4 with safe staging." -ForegroundColor Cyan
+            @(Invoke-AsiToPixRobocopyImport -WorkItem @($copyWorkItems) -SetupPath $Plan.SetupPath -ThreadCount 4)
+        } else {
+            $fallbackCompletedItems = foreach ($item in $copyWorkItems) {
+                try {
+                    Copy-Item `
+                        -LiteralPath $item.Entry.File.FullName `
+                        -Destination $item.DestinationFile `
+                        -ErrorAction Stop
+                } catch {
+                    throw "Failed to copy '$($item.Entry.File.FullName)' to '$($item.DestinationFile)': $($_.Exception.Message)"
+                }
+
+                $item
+            }
+            @($fallbackCompletedItems)
+        }
+
+        foreach ($item in $completedItems) {
             $imported++
-            $displayOperation = if ($Plan.ImportMode -eq "Symlink") { "link" } else { "+" }
-            Write-Host "  [$displayOperation] $fileName -> $($entry.FilterName)\$destinationNightFolder" -ForegroundColor Green
+            Write-Host "  [+] $($item.Entry.File.Name) -> $($item.Entry.FilterName)\$($item.DestinationNightFolder)" -ForegroundColor Green
         }
     }
 
@@ -1146,6 +1578,7 @@ function Invoke-AsiToPixImportPlan {
         AlreadyInGood   = $skippedExisting
         PreservedTrash  = $skippedTrash
         ImportMode      = $Plan.ImportMode
+        CopyEngine      = $copyEngine
         SourcePath      = $Plan.SourcePath
         DestinationRoot = $Plan.SetupPath
     }
@@ -1211,6 +1644,7 @@ Export-ModuleMember -Function `
     Get-AsiToPixSetupInfo, `
     Invoke-AsiToPixImportPlan, `
     Get-AsiToPixImportPlan, `
+    Read-AsiToPixImportSource, `
     Read-AsiToPixImportMode, `
     Resolve-AsiToPixImportSourcePath, `
     Resolve-AsiToPixLightFileInfo, `

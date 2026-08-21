@@ -43,7 +43,7 @@
 ## Недочеты структуры скриптов
 
 - [ ] Добавить во все executable scripts `[CmdletBinding()]`, explicit `param()`, `Set-StrictMode -Version Latest`, `$ErrorActionPreference = 'Stop'`.
-- [x] Заменить hardcoded `Z:\AstroPhoto` и `Z:\AstroPhoto\Calibration` на автоматический поиск `*:\AstroPhoto` с ручным fallback.
+- [x] Заменить hardcoded `Z:\AstroPhoto` и `Z:\AstroPhoto\Calibration` на автоматический поиск синонимов `*:\AstroPhoto` и `*:\Astro` с ручным fallback.
 - [ ] Удалить неиспользуемый `$localBase` из `CreateProject.ps1` или оформить как параметр, если он нужен.
 - [ ] Вынести повторяемые функции и правила в модуль под `src/`.
 - [ ] Вынести интерактивные подтверждения `Y/n` в общий helper.
@@ -72,6 +72,22 @@
 - [ ] После каждого изменения показывать `git diff`.
 ## Recent fixes
 
+- [x] `CreateProject.ps1`: offer to reuse per-night flat selections from the previous `project_meta.json`, while prompting only for new, missing, or ambiguous sessions.
+- [x] `CreateProject.ps1`: create preview links with their full original filenames and extended Windows paths so long ASIAir paths do not break symbolic-link creation.
+- [x] `CreateProject.ps1`: add an opt-in preview prompt after the OSC merge choice that randomly balances up to 15 light frames across nights for each camera/filter and creates file-level links or copies.
+- [x] `ExportMasters.ps1`: fuzzy-resolve an entered object name across every discovered `*:\AstroPhoto\Processing` and `*:\Astro\Processing` folder.
+- [x] `CreateProject.ps1`: make root-selection prompts start with explicit `SOURCE`/`DESTINATION` roles and visually separate the following lights prompt.
+- [x] `ExportMasters.ps1`: infer missing WBPP bias/dark `GAIN`, `TEMP`, and exposure tags from `project_meta.json` only when calibration metadata resolves to one destination folder.
+- [x] `CreateProject.ps1`: select source (`ASIAir` and `Calibration`) and destination (`Processing`) roots independently, with explicit read/write labels and command-line parameters.
+- [x] `ImportCalibration.ps1`: label root selection as reading from `<root>\Import` and writing to `<root>\Calibration`, or as destination-only when `SourcePath` is explicit.
+- [x] `ImportCalibration.ps1`: keep different flat exposures from one noon-to-noon night in separate folders using neutral suffixes such as `800ms`, without treating the suffix as a rotator angle.
+- [x] `ImportCalibration.ps1`: discover `Import\<Setup>\bias(es)`, `dark(s)`, and `flat(s)` folders automatically, print the complete categorized list, and confirm all discovered sources once.
+- [x] `ImportCalibration.ps1`: accelerate same-share NAS copies with safe staged `Robocopy /J /MT:4`, a stable throughput progress banner, and a `Copy-Item` fallback.
+- [x] `ImportSession.ps1`: reduce NAS round trips by checking each destination filter/night directory once per plan and scan source files only after object-folder name matching.
+- [x] `ImportSession.ps1`/`ImportAll.ps1`: accelerate same-share NAS Copy imports with batched `Robocopy /J /MT:4` through safe per-plan staging, retaining the `Copy-Item` fallback and Symlink behavior.
+- [x] `ImportSession.ps1`/`ImportAll.ps1`: replace noisy multithreaded Robocopy output and duplicate batch summaries with one stable progress banner containing file count, average throughput, and elapsed time.
+- [x] `ImportSession.ps1`: re-prompt after an invalid interactively entered source path or object name instead of terminating on a typo.
+- [x] Support both `Catalog (Object name)` and legacy `Catalog - Object name` folder formats in the ASIAir observation archive.
 - [x] `CleanupWbpp.ps1`: show per-project reclaimable space in GB and report the total reclaimed or previewed size in the final summary.
 - [x] `CleanupWbpp.ps1`: always clean the sibling `<project_dir>\Pix` folder so renamed projects work even when `project_meta.json` contains stale paths.
 - [x] `CleanupWbpp.ps1`: scan processing projects, confirm each cleanup separately, remove WBPP outputs and calibration masters, preserve `masterLight*.*`, and support safe `-WhatIf` previews.

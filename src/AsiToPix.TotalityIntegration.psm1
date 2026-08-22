@@ -1053,14 +1053,20 @@ function Invoke-AsiToPixTotalityIntegrationPlan {
         [string]$PixInsightScriptPath,
 
         [ValidateSet("Dedicated", "Reuse")]
-        [string]$PixInsightMode = "Dedicated"
+        [string]$PixInsightMode = "Dedicated",
+
+        [ValidateSet("Integration", "HDR")]
+        [string]$Operation = "Integration"
     )
+
+    $operationName = if ($Operation -eq "HDR") { "HDR composition" } else { "integration" }
+    $operationVerb = if ($Operation -eq "HDR") { "Compose" } else { "Integrate" }
 
     if (-not (Test-Path -LiteralPath $PixInsightPath -PathType Leaf)) {
         throw "PixInsight executable not found: '$PixInsightPath'."
     }
     if (-not (Test-Path -LiteralPath $PixInsightScriptPath -PathType Leaf)) {
-        throw "PixInsight integration script not found: '$PixInsightScriptPath'."
+        throw "PixInsight $operationName script not found: '$PixInsightScriptPath'."
     }
     if ($PixInsightMode -eq "Reuse" -and
         @(Get-Process -Name "PixInsight" -ErrorAction SilentlyContinue).Count -eq 0) {
@@ -1085,7 +1091,7 @@ function Invoke-AsiToPixTotalityIntegrationPlan {
 
     foreach ($block in @($Plan | Sort-Object -Property BlockNumber)) {
         if (-not $block.CanIntegrate) {
-            Write-Warning "Skipping block $($block.BlockNumber) ($($block.FirstIndex)-$($block.LastIndex)): $($block.SkipReason)."
+            Write-Warning "Skipping $operationName block $($block.BlockNumber) ($($block.FirstIndex)-$($block.LastIndex)): $($block.SkipReason)."
             $rejectedCount++
             continue
         }
@@ -1111,7 +1117,7 @@ function Invoke-AsiToPixTotalityIntegrationPlan {
         else {
             "processed"
         }
-        $description = "Integrate $($block.FrameCount) $inputStageDescription frames with PixInsight"
+        $description = "$operationVerb $($block.FrameCount) $inputStageDescription frames with PixInsight"
         if (-not $PSCmdlet.ShouldProcess($block.OutputPath, $description)) {
             $notApprovedCount++
             continue
@@ -1159,7 +1165,7 @@ function Invoke-AsiToPixTotalityIntegrationPlan {
             $scriptText = [System.IO.File]::ReadAllText($PixInsightScriptPath, [System.Text.Encoding]::UTF8)
             $ipcMarker = "// ASITOPIX_IPC_MANIFEST"
             if (-not $scriptText.Contains($ipcMarker)) {
-                throw "PixInsight integration script has no IPC manifest marker: '$PixInsightScriptPath'."
+                throw "PixInsight $operationName script has no IPC manifest marker: '$PixInsightScriptPath'."
             }
             $manifestPathLiteral = ConvertTo-Json -InputObject ([string]$manifestInfo.ManifestPath) -Compress
             $ipcDeclaration = "var ASITOPIX_MANIFEST_PATH = $manifestPathLiteral;"
@@ -1177,10 +1183,10 @@ function Invoke-AsiToPixTotalityIntegrationPlan {
             -IpcScriptPath $ipcScriptPath
 
         if ($PixInsightMode -eq "Reuse") {
-            Write-Host "Sending $($approvedBlocks.Count) integration block(s) to a running PixInsight instance; it will remain open." -ForegroundColor Cyan
+            Write-Host "Sending $($approvedBlocks.Count) $operationName block(s) to a running PixInsight instance; it will remain open." -ForegroundColor Cyan
         }
         else {
-            Write-Host "Starting one dedicated PixInsight instance for $($approvedBlocks.Count) integration block(s)." -ForegroundColor Cyan
+            Write-Host "Starting one dedicated PixInsight instance for $($approvedBlocks.Count) $operationName block(s)." -ForegroundColor Cyan
         }
         $process = Start-Process `
             -FilePath $PixInsightPath `
@@ -1206,13 +1212,22 @@ function Invoke-AsiToPixTotalityIntegrationPlan {
                         $currentBlock = @($approvedBlocks | Where-Object {
                             $_.BlockNumber -eq $progressStatus.currentBlockNumber
                         })[0]
-                        Write-Host (
-                            "Integrating block {0}: {1}-{2} ({3} frames)" -f
-                            $currentBlock.BlockNumber,
-                            $currentBlock.FirstIndex,
-                            $currentBlock.LastIndex,
-                            $currentBlock.FrameCount
-                        ) -ForegroundColor Cyan
+                        if ($Operation -eq "HDR") {
+                            Write-Host (
+                                "Composing HDR block {0}: {1}" -f
+                                $currentBlock.BlockNumber,
+                                (@($currentBlock.ExposureLabels) -join " + ")
+                            ) -ForegroundColor Cyan
+                        }
+                        else {
+                            Write-Host (
+                                "Integrating block {0}: {1}-{2} ({3} frames)" -f
+                                $currentBlock.BlockNumber,
+                                $currentBlock.FirstIndex,
+                                $currentBlock.LastIndex,
+                                $currentBlock.FrameCount
+                            ) -ForegroundColor Cyan
+                        }
                         $lastReportedBlockNumber = $progressStatus.currentBlockNumber
                     }
                 }
@@ -1236,10 +1251,10 @@ function Invoke-AsiToPixTotalityIntegrationPlan {
                     throw "PixInsight IPC client returned exit code $($process.ExitCode) before the PJSR script started."
                 }
                 if (@(Get-Process -Name "PixInsight" -ErrorAction SilentlyContinue).Count -eq 0) {
-                    throw "The reused PixInsight instance closed before integration completed."
+                    throw "The reused PixInsight instance closed before $operationName completed."
                 }
                 if ([DateTime]::UtcNow -ge $ipcDeadline) {
-                    throw "Timed out after 12 hours while waiting for integration in the reused PixInsight instance."
+                    throw "Timed out after 12 hours while waiting for $operationName in the reused PixInsight instance."
                 }
             }
 
@@ -1290,7 +1305,7 @@ function Invoke-AsiToPixTotalityIntegrationPlan {
     }
     catch {
         $retainDiagnostics = $true
-        throw "PixInsight integration plan failed: $($_.Exception.Message) Diagnostics retained at '$temporaryDirectory'."
+        throw "PixInsight $operationName plan failed: $($_.Exception.Message) Diagnostics retained at '$temporaryDirectory'."
     }
     finally {
         if (-not $retainDiagnostics) {

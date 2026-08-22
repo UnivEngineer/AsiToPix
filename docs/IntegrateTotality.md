@@ -1,4 +1,4 @@
-# Схёмка и обработка полной фазы солнечного затмения: SER → HDR
+# Съёмка и обработка полной фазы солнечного затмения: SER → HDR
 
 ---
 
@@ -265,23 +265,52 @@ IntegrateTotality.ps1
   ↓
 Block masters 1/10/100 ms
   ↓
-Alignment masters между экспозициями
+единая геометрия masters между экспозициями
   ↓
-HDRComposition
+AlignTotality.ps1
+  ↓
+HDR\Aligned
+  ↓
+HDRTotality.ps1
+  ↓
+HDR\Composed
+  ↓
+NormalizeTotality.ps1
+  ↓
+HDR\Calibrated
   ↓
 финальная обработка
 ```
 
 Обрабатывать `1 ms`, `10 ms` и `100 ms` независимо до стадии HDR.
 
+Последние четыре стадии автоматизированы скриптами из корня проекта AsiToPix:
+
+```text
+IntegrateTotality.ps1 → интеграция временных блоков одной экспозиции
+AlignTotality.ps1     → ChannelMatch RGB + поворот/flip всех block masters
+HDRTotality.ps1       → HDRComposition одинаковых номеров блоков
+NormalizeTotality.ps1 → нормализация яркости и фиксированная коррекция цвета
+```
+
 ---
 
 ### 2. Структура каталогов
 
+Рабочий корень для автоматизированного pipeline:
+
+```text
+Z:\AstroPhoto\SharpCap\Totality-2026\
+```
+
+Скрипты `AlignTotality.ps1`, `HDRTotality.ps1` и `NormalizeTotality.ps1` ищут
+корни по алиасам `*:\AstroPhoto` и `*:\Astro`. Если найдено несколько корней,
+скрипт предлагает выбрать нужный. Полные пути также можно передать параметрами.
+
 Например, для 100 ms:
 
 ```text
-C:\AstroPhoto\Processing\Totality\
+Z:\AstroPhoto\SharpCap\Totality-2026\
 └── Total-100ms\
     ├── Frames\
     │   ├── raw\
@@ -305,7 +334,7 @@ Total-100ms\
 Калибровочные данные удобно держать отдельно:
 
 ```text
-C:\AstroPhoto\Processing\Totality\Calibration\
+Z:\AstroPhoto\SharpCap\Totality-2026\Calibration\
 ├── Flats\
 │   ├── raw\
 │   └── calibrated\
@@ -313,6 +342,21 @@ C:\AstroPhoto\Processing\Totality\Calibration\
 │   └── raw\
 ├── masterFlatDark.xisf
 └── masterFlat.xisf
+```
+
+После автоматизированной обработки добавляется дерево:
+
+```text
+Z:\AstroPhoto\SharpCap\Totality-2026\HDR\
+├── channel_match_offsets.json
+├── Aligned\
+│   └── Block_005_100ms_Totality_00123_00150_ca_r180.xisf
+├── Composed\
+│   └── Block-005-HDR.xisf
+└── Calibrated\
+    ├── normalization_metrics.csv
+    ├── Block-005-HDR_norm.xisf
+    └── Block-005-HDR_norm_cc.xisf
 ```
 
 ---
@@ -422,7 +466,7 @@ Pixel rejection   = Winsorized Sigma Clipping
 Полученный master сохранить как:
 
 ```text
-C:\AstroPhoto\Processing\Totality\Calibration\masterFlat.xisf
+Z:\AstroPhoto\SharpCap\Totality-2026\Calibration\masterFlat.xisf
 ```
 
 ---
@@ -434,7 +478,7 @@ C:\AstroPhoto\Processing\Totality\Calibration\masterFlat.xisf
 Например:
 
 ```text
-C:\AstroPhoto\Processing\Totality\Total-100ms\Frames\raw\
+Z:\AstroPhoto\SharpCap\Totality-2026\Total-100ms\Frames\raw\
 ```
 
 через:
@@ -496,7 +540,7 @@ Debayer
 Карту строить по:
 
 ```text
-C:\AstroPhoto\Processing\Totality\Calibration\masterFlatDark.xisf
+Z:\AstroPhoto\SharpCap\Totality-2026\Calibration\masterFlatDark.xisf
 ```
 
 а не по солнечному light-кадру.
@@ -535,7 +579,7 @@ Sample format    = 32-bit floating point
 Сохранить, например:
 
 ```text
-C:\AstroPhoto\Processing\Totality\Calibration\DefectMap.xisf
+Z:\AstroPhoto\SharpCap\Totality-2026\Calibration\DefectMap.xisf
 ```
 
 Эта карта используется **только для поиска и проверки дефектов**. Пакетно применять `DefectMap` к light frames не требуется.
@@ -644,13 +688,13 @@ CFA              = ON
 Input:
 
 ```text
-C:\AstroPhoto\Processing\Totality\Total-100ms\Frames\calibrated\
+Z:\AstroPhoto\SharpCap\Totality-2026\Total-100ms\Frames\calibrated\
 ```
 
 Output:
 
 ```text
-C:\AstroPhoto\Processing\Totality\Total-100ms\Frames\corrected\
+Z:\AstroPhoto\SharpCap\Totality-2026\Total-100ms\Frames\corrected\
 ```
 
 Аналогично обработать:
@@ -766,6 +810,20 @@ Output:
 ...\Frames\registered\
 ```
 
+#### Единая геометрия для HDR
+
+Хотя экспозиции обрабатываются раздельно, к моменту интеграции их reference
+frames должны задавать одну геометрию. Предпочтительный reference — хороший
+центральный кадр 10 ms. Если один reference нельзя надёжно применить ко всем
+экспозициям, сначала совместить отдельные reference frames между собой, а
+затем регистрировать каждую серию в соответствующую, но уже согласованную
+геометрию.
+
+Перед интеграцией проверить, что зарегистрированные 1/10/100 ms имеют один
+размер и одинаковое положение солнечного диска. `AlignTotality.ps1` на более
+поздней стадии исправляет RGB ChannelMatch и ориентацию, но не заменяет эту
+межэкспозиционную регистрацию.
+
 Перед дальнейшей обработкой обязательно проверить через Blink:
 
 * корона должна стоять;
@@ -857,7 +915,7 @@ Beads не включать в обычные totality HDR-блоки.
 Путь:
 
 ```text
-C:\AstroPhoto\Processing\Totality\Total-100ms\Frames\manifest.json
+Z:\AstroPhoto\SharpCap\Totality-2026\Total-100ms\Frames\manifest.json
 ```
 
 #### Поля
@@ -919,8 +977,14 @@ SkipIndices
 содержит единый массив обработанных файлов, запускать:
 
 ```powershell
-.\IntegrateTotality.ps1
+$totalityRoot = "Z:\AstroPhoto\SharpCap\Totality-2026"
+.\IntegrateTotality.ps1 -ProcessingRoot $totalityRoot
 ```
+
+У `IntegrateTotality.ps1` исторический путь по умолчанию —
+`C:\AstroPhoto\Processing\Totality`. Поэтому для дерева
+`*:\AstroPhoto\SharpCap\Totality-2026` параметр `-ProcessingRoot` нужно
+передавать явно.
 
 Скрипт запросит исходную папку:
 
@@ -930,7 +994,12 @@ Input folder:
   [2] Debayered
 ```
 
-Для автоматического запуска можно передать `-InputStage Registered` или `-InputStage Debayered`. Вариант `Debayered` полезен, если регистрация сделала последовательность менее стабильной.
+Для автоматического запуска можно передать `-InputStage Registered` или
+`-InputStage Debayered`. Вариант `Debayered` полезен для диагностики, если
+регистрация сделала последовательность менее стабильной, но он не создаёт
+единую геометрию между экспозициями. Перед `HDRTotality.ps1` такие masters всё
+равно придётся геометрически совместить. Для основного автоматизированного
+pipeline использовать `Registered`.
 
 Если PixInsight уже запущен, скрипт также предложит режим выполнения:
 
@@ -946,6 +1015,7 @@ PixInsight execution mode:
 
 ```powershell
 .\IntegrateTotality.ps1 `
+    -ProcessingRoot "Z:\AstroPhoto\SharpCap\Totality-2026" `
     -Exposure Total-100ms `
     -InputStage Debayered `
     -PixInsightMode Reuse
@@ -956,7 +1026,7 @@ PixInsight execution mode:
 Output:
 
 ```text
-C:\AstroPhoto\Processing\Totality\Total-100ms\Frames\integrated\
+Z:\AstroPhoto\SharpCap\Totality-2026\Total-100ms\Frames\integrated\
 ```
 
 Пример:
@@ -965,7 +1035,22 @@ C:\AstroPhoto\Processing\Totality\Total-100ms\Frames\integrated\
 Block_003_100ms_Totality_00063_00090.xisf
 ```
 
-То же самое сделать для 1 и 10 ms.
+Скрипт обрабатывает одну экспозиционную папку за запуск. Поэтому его нужно
+повторить для всех ступеней:
+
+```powershell
+foreach ($exposure in @("Total-1ms", "Total-10ms", "Total-100ms")) {
+    .\IntegrateTotality.ps1 `
+        -ProcessingRoot "Z:\AstroPhoto\SharpCap\Totality-2026" `
+        -Exposure $exposure `
+        -InputStage Registered `
+        -PixInsightMode Reuse
+}
+```
+
+Перед пакетным циклом PixInsight должен быть уже запущен. Если выбран
+`Dedicated`, каждый запуск создаёт отдельный автоматизированный экземпляр и
+закрывает его после интеграции.
 
 ---
 
@@ -974,23 +1059,25 @@ Block_003_100ms_Totality_00063_00090.xisf
 Для totality blocks:
 
 ```text
-Combination                 = Average
-Normalization               = No normalization
-Weights                     = Don't care
+Combination                   = Average
+Normalization                 = No normalization
+Weights                       = Don't care
 
-Pixel Rejection             = Winsorized Sigma Clipping
+Pixel Rejection               = Winsorized Sigma Clipping
 Pixel Rejection Normalization = Scale + zero offset
 
-Sigma Low                   = 3.5
-Sigma High                  = 4.0
+Reject Low                    = true
+Reject High                   = false
 
-Large-scale low rejection   = ON
-Layers                      = 2
-Growth                      = 3
+Sigma Low                     = 3.5
 
-Large-scale high rejection  = OFF
+Large-scale low rejection     = ON
+Layers                        = 2
+Growth                        = 3
 
-Generate rejection maps     = ON
+Large-scale high rejection    = OFF
+
+Generate rejection maps       = ON
 ```
 
 Эти параметры дали рабочий результат:
@@ -1055,62 +1142,238 @@ Block-010
 
 ---
 
-### 15. HDR каждого блока
+### 15. Выравнивание каналов и ориентации: AlignTotality.ps1
 
 После интеграции каждой экспозиции получится примерно:
 
 ```text
 Total-1ms\Frames\integrated\
-    Block_003_1ms_Totality_....
+    Block_003_1ms_Totality_00043_00060.xisf
 
 Total-10ms\Frames\integrated\
-    Block_003_10ms_Totality_....
+    Block_003_10ms_Totality_00052_00075.xisf
 
 Total-100ms\Frames\integrated\
-    Block_003_100ms_Totality_....
+    Block_003_100ms_Totality_00063_00090.xisf
 ```
 
-Для одного временного блока собрать тройку:
+Перед HDR все экспозиции одного блока должны иметь:
 
 ```text
-Block03_1ms
-Block03_10ms
-Block03_100ms
+одинаковый размер изображения
+одинаковую ориентацию
+одинаковое положение солнечного диска и короны
 ```
 
-Эти три masters были зарегистрированы к разным исходным reference frames, поэтому перед HDR их надо **точно совместить друг с другом**.
+Важно: `AlignTotality.ps1` выполняет `ChannelMatch` между R/G/B внутри каждого
+изображения и опциональный `FastRotation`. Он **не регистрирует 1/10/100 ms
+masters друг относительно друга**. Геометрию между экспозициями надо привести
+к одному reference ещё на стадии Registration. Если masters были получены с
+разной геометрией, сначала исправить регистрацию и повторить интеграцию.
 
-Практически:
+Запуск из корня AsiToPix:
 
-```text
-reference = 10 ms master
+```powershell
+.\AlignTotality.ps1
 ```
 
-1 ms и 100 ms довести к нему через `DynamicAlignment`.
+По умолчанию скрипт:
 
-Реперы:
+1. находит `*:\AstroPhoto` и `*:\Astro`;
+2. выбирает `SharpCap\Totality-2026` под выбранным корнем;
+3. ищет все папки `Total-<экспозиция>\Frames\integrated`;
+4. предлагает поворот `0/90/180/270` градусов;
+5. предлагает `None/Horizontal/Vertical` mirror;
+6. сохраняет результат в `HDR\Aligned`.
 
-```text
-1 ms  → протуберанцы / хромосфера
-10 ms → reference
-100 ms → структура внутренней короны
+Если нужен явный корень:
+
+```powershell
+.\AlignTotality.ps1 `
+    -TotalityPath "Z:\AstroPhoto\SharpCap\Totality-2026"
 ```
 
-После этого:
+#### Получение offsets из ChannelMatch
+
+При первом запуске или при выборе новых offsets скрипт запускает PixInsight,
+если он ещё не открыт, и показывает рекомендуемый reference: центральный блок
+со средней найденной экспозицией. На нём должны быть хорошо видны лунный лимб
+и хромосфера без сильного пересвета.
+
+Во время этой стадии должен работать ровно один экземпляр PixInsight. Если
+открыто несколько экземпляров, лишние надо закрыть до запуска плана.
+
+В PixInsight:
+
+1. открыть предложенный XISF;
+2. открыть `ChannelMatch`;
+3. подобрать X/Y offsets каналов R/G/B;
+4. не менять linear correction factors;
+5. перетащить синий треугольник **New Instance** из ChannelMatch на свободное
+   место PixInsight workspace;
+6. вернуться в PowerShell и нажать Enter.
+
+Одного открытого интерфейса ChannelMatch недостаточно: PJSR читает параметры
+из созданного process icon. Скрипт запоминает список старых ChannelMatch icons
+и принимает ровно один новый icon, поэтому его надо создать на свободном месте,
+не заменяя старый.
+
+Из icon сохраняются `enabled`, `dx` и `dy` всех трёх каналов. Linear correction
+factor принудительно устанавливается в `1.0`, поэтому эта стадия не меняет
+яркость и цветовой баланс.
+
+Offsets записываются в:
 
 ```text
-HDRComposition
+Z:\AstroPhoto\SharpCap\Totality-2026\HDR\channel_match_offsets.json
 ```
 
-Порядок:
+При следующем запуске скрипт спрашивает, использовать ли этот JSON. Режим можно
+задать явно:
+
+```powershell
+# Использовать сохранённые offsets без настройки ChannelMatch
+.\AlignTotality.ps1 -ChannelMatchMode Saved
+
+# Принудительно получить новые offsets и перезаписать JSON
+.\AlignTotality.ps1 -ChannelMatchMode Capture
+```
+
+#### Поворот и flip
+
+После ChannelMatch к каждому файлу сразу применяется выбранный `FastRotation`:
+
+```powershell
+.\AlignTotality.ps1 `
+    -Rotation 180 `
+    -Flip None
+```
+
+Допустимые значения:
 
 ```text
-1 ms
-10 ms
+Rotation = 0, 90, 180, 270
+Flip     = None, Horizontal, Vertical
+```
+
+`90` означает 90° по часовой стрелке, `270` — 90° против часовой. Если выбраны
+и поворот, и mirror, сначала выполняется поворот, затем mirror.
+
+Операции отражаются в имени:
+
+```text
+_ca       → ChannelMatch применён
+_r180     → поворот 180°
+_fh       → horizontal mirror
+_fv       → vertical mirror
+```
+
+Примеры:
+
+```text
+Block_005_100ms_Totality_00123_00150_ca.xisf
+Block_005_100ms_Totality_00123_00150_ca_r180.xisf
+Block_005_100ms_Totality_00123_00150_ca_r90_fh.xisf
+```
+
+Выходные XISF на этой стадии не перезаписываются. Существующие файлы помечаются
+в плане как `Skip: output exists`. Для повторной обработки с другими offsets
+или transforms старые файлы из `HDR\Aligned` надо предварительно перенести или
+удалить вручную после проверки пути.
+
+План без запуска PixInsight и без создания файлов:
+
+```powershell
+.\AlignTotality.ps1 `
+    -Rotation 180 `
+    -Flip None `
+    -ChannelMatchMode Capture `
+    -WhatIf
+```
+
+---
+
+### 16. HDR-композиция блоков: HDRTotality.ps1
+
+Input:
+
+```text
+Z:\AstroPhoto\SharpCap\Totality-2026\HDR\Aligned\
+```
+
+Скрипт группирует файлы по номеру блока и экспозиции. Для трёх найденных
+экспозиций предлагает все непрерывные HDR-лестницы, для которых есть хотя бы
+один полный блок:
+
+```text
+1 ms + 10 ms + 100 ms
+1 ms + 10 ms
+10 ms + 100 ms
+```
+
+Обычный интерактивный запуск:
+
+```powershell
+.\HDRTotality.ps1
+```
+
+Явный корень без выбора алиаса:
+
+```powershell
+.\HDRTotality.ps1 -AstroPhotoRoot "Z:\AstroPhoto"
+```
+
+Лестницу и режим PixInsight можно задать явно:
+
+```powershell
+.\HDRTotality.ps1 `
+    -Exposure @("1ms", "10ms", "100ms") `
+    -PixInsightMode Reuse
+```
+
+Доступны два режима:
+
+```text
+Reuse     → использовать запущенный PixInsight и оставить его открытым
+Dedicated → запустить отдельный PixInsight и закрыть после обработки
+```
+
+В `HDRComposition.images` файлы передаются от длинной экспозиции к короткой:
+
+```text
 100 ms
+10 ms
+1 ms
 ```
 
-`Reject black pixels` включить.
+Если в используемом экземпляре PixInsight есть process icon с точным именем
+`HDRComposition`, скрипт берёт его настройки и заменяет только список images.
+Это позволяет заранее настроить, например, `Reject black pixels`. Если icon не
+найден, используется новый `HDRComposition` с настройками PixInsight по
+умолчанию. Для использования собственного icon выбирать `Reuse` в том
+экземпляре, где этот icon создан.
+
+Output:
+
+```text
+Z:\AstroPhoto\SharpCap\Totality-2026\HDR\Composed\
+    Block-001-HDR.xisf
+    Block-002-HDR.xisf
+    ...
+```
+
+Блоки без полного набора выбранных экспозиций пропускаются с перечислением
+недостающих ступеней. Существующие `Block-<номер>-HDR.xisf` не
+перезаписываются.
+
+Проверка плана:
+
+```powershell
+.\HDRTotality.ps1 `
+    -Exposure @("10ms", "100ms") `
+    -PixInsightMode Dedicated `
+    -WhatIf
+```
 
 Роли экспозиций:
 
@@ -1125,11 +1388,101 @@ HDRComposition
 → средняя и внешняя корона
 ```
 
-Пересвет протуберанцев на 100 ms не имеет значения: HDR должен заменить эту область короткими экспозициями.
+Пересвет протуберанцев на 100 ms не имеет значения: HDR должен заменить эту
+область короткими экспозициями.
 
 ---
 
-### 16. Главный статичный результат
+### 17. Нормализация яркости и цвета: NormalizeTotality.ps1
+
+Input:
+
+```text
+Z:\AstroPhoto\SharpCap\Totality-2026\HDR\Composed\
+    Block-001-HDR.xisf
+    ...
+```
+
+Запуск:
+
+```powershell
+.\NormalizeTotality.ps1
+```
+
+Явный корень без выбора алиаса:
+
+```powershell
+.\NormalizeTotality.ps1 -AstroPhotoRoot "Z:\AstroPhoto"
+```
+
+Для этой интерактивной операции нужен ровно один PixInsight. Если он не
+запущен, скрипт запускает его. Если открыто несколько экземпляров, лишние надо
+закрыть перед запуском.
+
+После подтверждения плана скрипт просит подготовить reference ROI:
+
+1. открыть один из `Block-*-HDR.xisf` непосредственно из `HDR\Composed`;
+2. создать Preview в области, которая присутствует на всех блоках;
+3. выбрать стабильную несатурированную область без края Луны, дерева, облаков
+   и других движущихся деталей;
+4. активировать Preview и вернуться в PowerShell;
+5. нажать Enter.
+
+Reference обязан быть одним из входных `Block-*-HDR.xisf`. Если в окне только
+один Preview, его можно не активировать отдельно; при нескольких Preview надо
+активировать нужный.
+
+Скрипт читает координаты ROI и измеряет медианы `Rref/Gref/Bref`. Для каждого
+кадра в той же ROI вычисляются:
+
+```text
+kR = Rref / R
+kG = Gref / G
+kB = Bref / B
+k  = median(kR, kG, kB)
+```
+
+Сначала всё изображение умножается на scalar `k`. Затем ко всем уже
+нормализованным кадрам применяются одинаковые коэффициенты reference:
+
+```text
+cR = Gref / Rref
+cG = 1
+cB = Gref / Bref
+```
+
+Output:
+
+```text
+Z:\AstroPhoto\SharpCap\Totality-2026\HDR\Calibrated\
+    normalization_metrics.csv
+    Block-001-HDR_norm.xisf
+    Block-001-HDR_norm_cc.xisf
+    ...
+```
+
+Назначение файлов:
+
+```text
+*_norm.xisf    → только scalar normalization
+*_norm_cc.xisf → scalar normalization + фиксированные RGB coefficients
+```
+
+CSV содержит input/output paths, reference flag, Preview ID, координаты ROI,
+медианы RGB, `kR/kG/kB`, итоговый `k` и `cR/cG/cB` для каждого блока.
+
+В отличие от предыдущих стадий, повторный запуск `NormalizeTotality.ps1`
+перезаписывает `normalization_metrics.csv`, `_norm.xisf` и `_norm_cc.xisf`.
+
+Проверка плана без запуска PixInsight:
+
+```powershell
+.\NormalizeTotality.ps1 -WhatIf
+```
+
+---
+
+### 18. Главный статичный результат
 
 Не обязательно смешивать всю totality.
 
@@ -1144,7 +1497,7 @@ HDRComposition
 
 ---
 
-### 17. Time-composite всей totality
+### 19. Time-composite всей totality
 
 Отдельный экспериментальный результат.
 
@@ -1159,7 +1512,7 @@ HDRComposition
 
 ---
 
-### 18. Анимация
+### 20. Анимация
 
 Block HDR отлично подходят для анимации:
 
@@ -1184,7 +1537,7 @@ HDR_Block10
 
 ---
 
-### 19. Цвет и атмосферная дисперсия
+### 21. Цвет и атмосферная дисперсия
 
 Не пытаться исправлять цвет до calibration/debayer. Например, если съёмка была сделана с:
 
@@ -1197,18 +1550,26 @@ WB_B = 99
 
 Кроме того, если Солнце было очень низко, то присутствует сильная атмосферная дисперсия.
 
-После получения masters/HDR можно:
+В автоматизированном pipeline атмосферная дисперсия исправляется до HDR:
 
-1. проверить R/G/B отдельно;
-2. через `ChannelMatch` совместить R и B относительно G по лимбу/протуберанцам;
-3. только затем заниматься цветовым балансом;
-4. финальный stretch делать после HDR.
+1. на хорошем integrated master проверить R/G/B отдельно;
+2. подобрать offsets в `ChannelMatch`, обычно относительно G;
+3. применить одни offsets ко всем masters через `AlignTotality.ps1`;
+4. проверить несколько файлов из `HDR\Aligned` до запуска HDR;
+5. после `HDRTotality.ps1` выровнять яркость и базовый RGB-баланс через
+   `NormalizeTotality.ps1`;
+6. финальный физический/визуальный цвет и stretch делать уже по
+   `*_norm_cc.xisf`.
+
+Коэффициенты `cR/cG/cB` из `NormalizeTotality.ps1` обеспечивают одинаковую
+фиксированную коррекцию всей серии, но не являются полноценной фотометрической
+калибровкой цвета.
 
 Цвет сумеречного неба не использовать как физический эталон.
 
 ---
 
-### 20. Что не переделывать без причины
+### 22. Что не переделывать без причины
 
 После того как получены нормальные CFA calibrated frames:
 
@@ -1224,20 +1585,46 @@ Calibration
 Debayer
 → Registration
 → Integration
+→ AlignTotality
+→ HDRTotality
+→ NormalizeTotality
 ```
 
 Если меняются настройки ImageIntegration, переделывается только:
 
 ```text
 Integration
-→ HDR
+→ AlignTotality
+→ HDRTotality
+→ NormalizeTotality
+```
+
+Если меняются ChannelMatch offsets, поворот или flip:
+
+```text
+AlignTotality
+→ HDRTotality
+→ NormalizeTotality
+```
+
+Если меняется HDR-лестница или настройки process icon `HDRComposition`:
+
+```text
+HDRTotality
+→ NormalizeTotality
+```
+
+Если меняется только reference Preview для нормализации:
+
+```text
+NormalizeTotality
 ```
 
 Исходные SER и calibrated CFA всегда сохранять как неизменяемую основу.
 
 ---
 
-### 21. Текущие особенности именно этого набора
+### 23. Текущие особенности именно этого набора
 
 Для этой съёмки установлено:
 
@@ -1274,7 +1661,10 @@ B = 99
 ```text
 не пытаться сделать один гигантский master всей totality
 → интегрировать исходными временными блоками
-→ собирать HDR каждого блока
-→ выбрать центральный HDR как основной still
-→ остальные использовать для time-composite и анимации
+→ согласовать геометрию экспозиций
+→ применить ChannelMatch и ориентацию через AlignTotality.ps1
+→ собрать HDR каждого блока через HDRTotality.ps1
+→ нормализовать серию через NormalizeTotality.ps1
+→ выбрать центральный *_norm_cc.xisf как основной still
+→ остальные нормализованные блоки использовать для time-composite и анимации
 ```

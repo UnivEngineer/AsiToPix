@@ -1,6 +1,26 @@
 ﻿$modulePath = Join-Path -Path $PSScriptRoot -ChildPath "..\src\AsiToPix.TotalityIntegration.psm1"
 Import-Module $modulePath -Force
 
+function Assert-TestTotalityError {
+    param(
+        [Parameter(Mandatory)]
+        [scriptblock]$Script,
+
+        [Parameter(Mandatory)]
+        [string]$MessagePattern
+    )
+
+    $caughtError = $null
+    try {
+        $null = & $Script
+    }
+    catch {
+        $caughtError = $_
+    }
+    $caughtError | Should Not BeNullOrEmpty
+    $caughtError.Exception.Message | Should Match $MessagePattern
+}
+
 function Get-TestTotalityFrame {
     param(
         [int]$Index
@@ -40,7 +60,9 @@ Describe "Totality frame discovery" {
         Set-Content -LiteralPath (Join-Path $registeredPath "Totality_1ms_00080_c_d_r.xisf") -Value "xisf"
         Set-Content -LiteralPath (Join-Path $registeredPath "Alternate_1ms_00080_c_d_r.fit") -Value "fit"
 
-        { Get-AsiToPixTotalityFrame -RegisteredPath $registeredPath } | Should Throw
+        Assert-TestTotalityError `
+            -Script { Get-AsiToPixTotalityFrame -RegisteredPath $registeredPath } `
+            -MessagePattern "Duplicate input frame indexes"
     }
 }
 
@@ -87,9 +109,12 @@ Describe "Totality sequence origin detection" {
         New-Item -ItemType Directory -Path $exposurePath -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $exposurePath "Totality_1ms_00023_c_d_r.xisf") -Value "frame"
 
-        { Get-AsiToPixTotalitySequenceStartIndex `
-            -ExposureDirectory (Split-Path -Path (Split-Path -Path $exposurePath -Parent) -Parent) } |
-            Should Throw
+        Assert-TestTotalityError `
+            -Script {
+                Get-AsiToPixTotalitySequenceStartIndex `
+                    -ExposureDirectory (Split-Path -Path (Split-Path -Path $exposurePath -Parent) -Parent)
+            } `
+            -MessagePattern "Cannot determine whether the sequence"
     }
 }
 
@@ -491,10 +516,14 @@ Describe "Totality integration planning" {
     It "rejects fixed blocks too small for ImageIntegration" {
         $frames = @(1..4 | ForEach-Object { Get-TestTotalityFrame -Index $_ })
 
-        { Get-AsiToPixTotalityIntegrationPlan `
-            -Frames $frames `
-            -OutputDirectory $TestDrive `
-            -BlockLength 2 } | Should Throw
+        Assert-TestTotalityError `
+            -Script {
+                Get-AsiToPixTotalityIntegrationPlan `
+                    -Frames $frames `
+                    -OutputDirectory $TestDrive `
+                    -BlockLength 2
+            } `
+            -MessagePattern "Block length must be zero"
     }
 }
 
@@ -591,10 +620,13 @@ Describe "PixInsight integration handoff" {
     }
 
     It "rejects comma-delimited automation paths before launching PixInsight" {
-        { Get-AsiToPixPixInsightArgumentList `
-            -ScriptPath "C:\Tools,Old\IntegrateTotality.js" `
-            -ManifestPath "C:\Temp\Block.json" } |
-            Should Throw
+        Assert-TestTotalityError `
+            -Script {
+                Get-AsiToPixPixInsightArgumentList `
+                    -ScriptPath "C:\Tools,Old\IntegrateTotality.js" `
+                    -ManifestPath "C:\Temp\Block.json"
+            } `
+            -MessagePattern "cannot contain commas"
     }
 
     It "does not create the output directory or launch PixInsight in WhatIf mode" {
@@ -858,6 +890,8 @@ Describe "PixInsight integration handoff" {
         $scriptText | Should Match 'P\.rejection = ImageIntegration\.prototype\.WinsorizedSigmaClip;'
         $scriptText | Should Match 'P\.sigmaLow = 3\.500;'
         $scriptText | Should Match 'P\.sigmaHigh = 4\.000;'
+        $scriptText | Should Match 'P\.clipHigh = false;'
+        $scriptText | Should Not Match 'P\.clipHigh = true;'
         $scriptText | Should Match 'P\.largeScaleClipLow = true;'
         $scriptText | Should Match 'P\.generateRejectionMaps = true;'
         $scriptText | Should Match 'P\.showImages = true;'

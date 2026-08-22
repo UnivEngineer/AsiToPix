@@ -72,6 +72,15 @@
 - [ ] После каждого изменения показывать `git diff`.
 ## Recent fixes
 
+- [x] Document the complete Totality workflow in `docs/IntegrateTotality.md`, including `AlignTotality.ps1`, `HDRTotality.ps1`, `NormalizeTotality.ps1`, their interactive PixInsight steps, outputs, rerun behavior, and command-line examples.
+- [x] Add `AlignTotality.ps1` and a manifest-driven PixInsight script to discover every `Total-<exposure>\Frames\integrated` frame, capture or reuse ChannelMatch RGB offsets, apply optional FastRotation transforms, persist offsets as JSON, and write operation-tagged frames under `HDR\Aligned`.
+- [x] Rename the Totality HDR composition entry point from `TotalityHDR.ps1` to `HDRTotality.ps1` for consistent stage naming.
+- [x] `NormalizeTotality.ps1`: allow a new normalization run to overwrite its metrics CSV and generated `_norm`/`_norm_cc` XISF frames.
+- [x] `IntegrateTotality.js`: disable high-pixel clipping during ImageIntegration to preserve Baily's beads without high-rejection artifacts.
+- [x] `NormalizeTotality.ps1`: track the original PixInsight GUI PID while waiting, allowing the transient second `PixInsight.exe` IPC client process without reporting a false failure.
+- [x] Add `NormalizeTotality.ps1` and a manifest-driven PixInsight script to measure a user-selected reference preview, normalize composed Totality HDR blocks by median RGB scale, apply fixed reference color coefficients, and save per-frame metrics plus `_norm`/`_norm_cc` outputs.
+- [x] `HDRTotality.ps1`: save results under `HDR\Composed` and fall back to a default `HDRComposition` process when the named process icon is unavailable.
+- [x] Add `HDRTotality.ps1` and a manifest-driven PixInsight script to discover aligned eclipse blocks, select contiguous exposure ladders, run `HDRComposition` from longest to shortest exposure, and save non-overwriting HDR frames in either a reused or dedicated PixInsight instance.
 - [x] `IntegrateTotality.ps1`: optionally reuse a running PixInsight instance through IPC, wait on the status manifest, and never close the reused application.
 - [x] `IntegrateTotality.ps1`: prompt for Registered or Debayered integration input, with `-InputStage` for automation and stage-specific readiness diagnostics.
 - [x] `IntegrateTotality.ps1`: ignore registered filename suffixes after the frame index and include the exposure label in integrated block filenames.

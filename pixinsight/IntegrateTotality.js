@@ -127,7 +127,7 @@ function integrateBlock( block )
    P.ccdReadNoise = 10.00;
    P.ccdScaleNoise = 0.00;
    P.clipLow = true;
-   P.clipHigh = true;
+   P.clipHigh = false;
    P.rangeClipLow = true;
    P.rangeLow = 0.000000;
    P.rangeClipHigh = false;

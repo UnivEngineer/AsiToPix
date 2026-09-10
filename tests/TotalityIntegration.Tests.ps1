@@ -815,7 +815,10 @@ Describe "PixInsight integration handoff" {
                 -Destination $scriptPath
 
             $script:reuseArguments = @()
-            $script:ipcManifestWasInjected = $false
+            $script:ipcScriptUsesSiblingManifest = $false
+            $script:ipcScriptHasConsistentCrLf = $false
+            $script:reuseManifest = $null
+            $script:reuseSleepCount = 0
             Mock Get-Process { [PSCustomObject]@{ Id = 12345 } }
             Mock Start-Process {
                 param(
@@ -836,32 +839,46 @@ Describe "PixInsight integration handoff" {
                 $script:reuseArguments = @($ArgumentList)
                 $ipcScriptPath = $ArgumentList[0].Substring('--execute='.Length).Trim('"')
                 $ipcScriptText = Get-Content -LiteralPath $ipcScriptPath -Raw -Encoding UTF8
-                $manifestMatch = [regex]::Match(
-                    $ipcScriptText,
-                    'var ASITOPIX_MANIFEST_PATH = (?<literal>".*?");'
-                )
-                $script:ipcManifestWasInjected = $manifestMatch.Success
-                $manifestPath = $manifestMatch.Groups["literal"].Value | ConvertFrom-Json
-                $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-                foreach ($block in $manifest.blocks) {
-                    Set-Content -LiteralPath $block.outputPath -Value "integrated"
+                $ipcScriptBytes = [System.IO.File]::ReadAllBytes($ipcScriptPath)
+                $lfWithoutCrCount = 0
+                for ($byteIndex = 0; $byteIndex -lt $ipcScriptBytes.Length; $byteIndex++) {
+                    if ($ipcScriptBytes[$byteIndex] -eq 10 -and
+                        ($byteIndex -eq 0 -or $ipcScriptBytes[$byteIndex - 1] -ne 13)) {
+                        $lfWithoutCrCount++
+                    }
                 }
-                [ordered]@{
-                    schemaVersion         = 1
-                    state                 = "completed"
-                    currentBlockNumber    = $null
-                    completedBlockNumbers = @($manifest.blocks.blockNumber)
-                    errorMessage          = ""
-                    errorStack            = ""
-                } | ConvertTo-Json | Set-Content -LiteralPath $manifest.statusPath -Encoding UTF8
+                $script:ipcScriptHasConsistentCrLf = $lfWithoutCrCount -eq 0
+                $script:ipcScriptUsesSiblingManifest =
+                    $ipcScriptText.Contains('var scriptFilePath = #__FILE__;') -and
+                    $ipcScriptText.Contains('"/IntegrationPlan.json"')
+                $manifestPath = Join-Path -Path (Split-Path -Parent $ipcScriptPath) `
+                    -ChildPath "IntegrationPlan.json"
+                $script:reuseManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
 
                 $process = [PSCustomObject]@{
-                    ExitCode = 0
+                    ExitCode = $null
                     HasExited = $true
                 }
                 $process | Add-Member -MemberType ScriptMethod -Name Refresh -Value { }
                 $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { }
                 $process
+            }
+            Mock Start-Sleep {
+                $script:reuseSleepCount++
+                if ($script:reuseSleepCount -eq 1) {
+                    foreach ($block in $script:reuseManifest.blocks) {
+                        Set-Content -LiteralPath $block.outputPath -Value "integrated"
+                    }
+                    [ordered]@{
+                        schemaVersion         = 1
+                        state                 = "completed"
+                        currentBlockNumber    = $null
+                        completedBlockNumbers = @($script:reuseManifest.blocks.blockNumber)
+                        errorMessage          = ""
+                        errorStack            = ""
+                    } | ConvertTo-Json |
+                        Set-Content -LiteralPath $script:reuseManifest.statusPath -Encoding UTF8
+                }
             }
 
             $result = Invoke-AsiToPixTotalityIntegrationPlan `
@@ -872,7 +889,9 @@ Describe "PixInsight integration handoff" {
                 -Confirm:$false
 
             $result.IntegratedCount | Should Be 1
-            $script:ipcManifestWasInjected | Should Be $true
+            $script:reuseSleepCount | Should Be 1
+            $script:ipcScriptHasConsistentCrLf | Should Be $true
+            $script:ipcScriptUsesSiblingManifest | Should Be $true
             $script:reuseArguments.Count | Should Be 1
             $script:reuseArguments[0] | Should Match '^--execute='
             @($script:reuseArguments | Where-Object { $_ -in @("-n", "--automation-mode", "--force-exit") }).Count |
@@ -900,7 +919,7 @@ Describe "PixInsight integration handoff" {
         $scriptText | Should Match 'for \( var i = 0; i < manifest\.blocks\.length; \+\+i \)'
         $scriptText | Should Match 'integrationWindow\.saveAs\( block\.outputPath, false, false, false, false \);'
         $scriptText | Should Match 'File\.writeTextFile\( statusPath, JSON\.stringify\( status, null, 2 \) \);'
-        $scriptText | Should Match 'typeof ASITOPIX_MANIFEST_PATH != "undefined"'
-        $scriptText | Should Match '// ASITOPIX_IPC_MANIFEST'
+        $scriptText | Should Match 'var scriptFilePath = #__FILE__;'
+        $scriptText | Should Match '"/IntegrationPlan.json"'
     }
 }

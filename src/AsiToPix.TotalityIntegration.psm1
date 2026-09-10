@@ -1176,8 +1176,19 @@ function Invoke-AsiToPixTotalityIntegrationPlan {
                 [System.Text.UTF8Encoding]::new($false)
             )
         }
+
+        # PJSR can misparse functions when a source file contains mixed CRLF
+        # and LF endings. Generate a text-identical UTF-8 copy with consistent
+        # Windows line endings for both dedicated and IPC execution modes.
+        $scriptText = [System.IO.File]::ReadAllText($PixInsightScriptPath, [System.Text.Encoding]::UTF8)
+        $normalizedScriptText = [regex]::Replace($scriptText, "\r\n|\r|\n", "`r`n")
+        [System.IO.File]::WriteAllText(
+            $ipcScriptPath,
+            $normalizedScriptText,
+            [System.Text.UTF8Encoding]::new($false)
+        )
         $arguments = Get-AsiToPixPixInsightArgumentList `
-            -ScriptPath $PixInsightScriptPath `
+            -ScriptPath $ipcScriptPath `
             -ManifestPath $manifestInfo.ManifestPath `
             -Mode $PixInsightMode `
             -IpcScriptPath $ipcScriptPath
@@ -1199,7 +1210,12 @@ function Invoke-AsiToPixTotalityIntegrationPlan {
 
         $lastReportedBlockNumber = $null
         $lastProgressStatus = $null
+        $ipcStartDeadline = [DateTime]::UtcNow.AddMinutes(1)
         $ipcDeadline = [DateTime]::UtcNow.AddHours(12)
+        if ($PixInsightMode -eq "Reuse") {
+            Write-Host "Waiting for the reused PixInsight instance to start the PJSR script." -ForegroundColor Cyan
+            Write-Host "If PixInsight asks whether to execute an unsigned script, approve that prompt." -ForegroundColor Yellow
+        }
         while ($true) {
             if (Test-Path -LiteralPath $manifestInfo.StatusPath -PathType Leaf) {
                 try {
@@ -1247,11 +1263,28 @@ function Invoke-AsiToPixTotalityIntegrationPlan {
                 break
             }
             if ($PixInsightMode -eq "Reuse") {
-                if ($process.HasExited -and $process.ExitCode -ne 0 -and $null -eq $lastProgressStatus) {
-                    throw "PixInsight IPC client returned exit code $($process.ExitCode) before the PJSR script started."
+                # The Windows GUI launcher can report HasExited before exposing
+                # a usable ExitCode. A null exit code is not a failure and the
+                # status file remains the authoritative execution result.
+                $ipcExitCode = $null
+                if ($process.HasExited) {
+                    try {
+                        $ipcExitCode = $process.ExitCode
+                    }
+                    catch {
+                        $ipcExitCode = $null
+                    }
+                }
+                if ($null -ne $ipcExitCode -and
+                    [int]$ipcExitCode -ne 0 -and
+                    $null -eq $lastProgressStatus) {
+                    throw "PixInsight IPC client returned exit code $ipcExitCode before the PJSR script started."
                 }
                 if (@(Get-Process -Name "PixInsight" -ErrorAction SilentlyContinue).Count -eq 0) {
                     throw "The reused PixInsight instance closed before $operationName completed."
+                }
+                if ($null -eq $lastProgressStatus -and [DateTime]::UtcNow -ge $ipcStartDeadline) {
+                    throw "The reused PixInsight instance did not start the PJSR script within one minute. Check PixInsight for an unsigned-script confirmation dialog and inspect its Process Console."
                 }
                 if ([DateTime]::UtcNow -ge $ipcDeadline) {
                     throw "Timed out after 12 hours while waiting for $operationName in the reused PixInsight instance."
@@ -1260,7 +1293,7 @@ function Invoke-AsiToPixTotalityIntegrationPlan {
 
             Start-Sleep -Milliseconds 500
         }
-        if (-not $process.HasExited) {
+        if ($PixInsightMode -eq "Dedicated" -and -not $process.HasExited) {
             $process.WaitForExit()
         }
 

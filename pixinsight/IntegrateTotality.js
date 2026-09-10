@@ -6,17 +6,23 @@
 #feature-id    Utilities > IntegrateTotality
 #feature-info  Integrates registered eclipse frame blocks prepared by AsiToPix.
 
-// ASITOPIX_IPC_MANIFEST
-
 function argumentValue( name )
 {
-   if ( name == "manifest" && typeof ASITOPIX_MANIFEST_PATH != "undefined" )
-      return ASITOPIX_MANIFEST_PATH;
-
    var prefix = name + "=";
    for ( var i = 0; i < jsArguments.length; ++i )
       if ( jsArguments[i].indexOf( prefix ) == 0 )
          return jsArguments[i].substring( prefix.length );
+
+   if ( name == "manifest" )
+   {
+      var scriptFilePath = #__FILE__;
+      var siblingManifestPath = File.extractDrive( scriptFilePath ) +
+                                File.extractDirectory( scriptFilePath ) +
+                                "/IntegrationPlan.json";
+      if ( File.exists( siblingManifestPath ) )
+         return siblingManifestPath;
+   }
+
    throw new Error( "Missing required command-line argument: " + name );
 }
 

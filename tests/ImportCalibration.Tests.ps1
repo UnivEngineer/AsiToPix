@@ -80,8 +80,13 @@ Describe "Calibration filename parsing" {
         $entryScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "..\ImportCalibration.ps1"
         $entryScriptText = Get-Content -LiteralPath $entryScriptPath -Raw
 
-        $entryScriptText | Should Match 'Read from\s+: <selected root>\\Import'
-        $entryScriptText | Should Match 'Write to\s+: <selected root>\\Calibration'
+        $entryScriptText | Should Match '\[Alias\("SourceRoot"\)\]\s*\[string\]\$SourceAstroPhotoRoot'
+        $entryScriptText | Should Match '\[Alias\("DestinationRoot"\)\]\s*\[string\]\$DestinationAstroPhotoRoot'
+        $entryScriptText | Should Match 'Join-Path -Path \$sourceRootForDiscovery -ChildPath "Import"'
+        $entryScriptText | Should Match 'Join-Path -Path \$AstroPhotoRoot -ChildPath "Calibration"'
+        $entryScriptText | Should Match 'Select the calibration source root \(read from <selected root>\\Import\)'
+        $entryScriptText | Should Match 'Resolve-AstroPhotoRoot[\s\S]*-Purpose "calibration source"[\s\S]*-AlwaysPrompt'
+        ($entryScriptText.IndexOf('Select the calibration source root') -lt $entryScriptText.IndexOf('Select the calibration destination root')) | Should Be $true
         $entryScriptText | Should Match 'Calibration source discovery \(read\): \$importRoot'
         $entryScriptText | Should Match 'Calibration library destination \(write\): \$calibrationRoot'
         $entryScriptText | Should Match 'Find-AsiToPixCalibrationImportFolder -ImportRoot \$importRoot'

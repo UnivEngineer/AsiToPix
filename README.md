@@ -77,6 +77,8 @@ Format support means that a frame is discovered and can be reported, copied, or 
 
 Clone or download the repository, open PowerShell in its directory, and create an `AstroPhoto` or `Astro` root on any available filesystem drive. Most commands automatically search for both `*:\AstroPhoto` and `*:\Astro`; if there is no unique match, they prompt for a path. Commands that expose `-AstroPhotoRoot` accept either root path explicitly.
 
+`ImportSession.ps1`, `ImportAll.ps1`, and `ImportCalibration.ps1` can read from one root and write to another. Use `-SourceAstroPhotoRoot` for source-root discovery and `-DestinationAstroPhotoRoot` for the archive or calibration-library destination; `-SourceRoot` and `-DestinationRoot` are shorter aliases. `-AstroPhotoRoot` remains supported as the legacy destination-root parameter. If a source root is omitted in a non-interactive command, it defaults to the destination root. During automatic source discovery, all three import scripts ask for the source root first and the destination root second.
+
 The minimum useful root is:
 
 ```text
@@ -233,15 +235,15 @@ Preview and import all staging sessions using the default Copy mode:
 
 ```powershell
 .\ImportAll.ps1 `
-    -AstroPhotoRoot 'D:\AstroPhoto' `
-    -ImportRoot 'D:\AstroPhoto\Import' `
+    -SourceAstroPhotoRoot 'D:\AstroPhoto' `
+    -DestinationAstroPhotoRoot 'E:\AstroPhoto' `
     -SeasonName '2026' `
     -ImportMode Copy `
     -WhatIf
 
 .\ImportAll.ps1 `
-    -AstroPhotoRoot 'D:\AstroPhoto' `
-    -ImportRoot 'D:\AstroPhoto\Import' `
+    -SourceAstroPhotoRoot 'D:\AstroPhoto' `
+    -DestinationAstroPhotoRoot 'E:\AstroPhoto' `
     -SeasonName '2026' `
     -ImportMode Copy
 ```
@@ -250,15 +252,16 @@ Import one session instead:
 
 ```powershell
 .\ImportSession.ps1 `
-    -SourcePath 'E:\ASIAIR\SQA55\Light\M 31' `
-    -AstroPhotoRoot 'D:\AstroPhoto' `
+    -SourcePath 'D:\AstroPhoto\Import\SQA55\Light\M 31' `
+    -SourceAstroPhotoRoot 'D:\AstroPhoto' `
+    -DestinationAstroPhotoRoot 'E:\AstroPhoto' `
     -ObjectName 'M 31' `
     -SeasonName '2026' `
     -TelescopeName 'SQA55 @ 1.0x' `
     -ImportMode Symlink
 ```
 
-`SourcePath` may be a folder, a light file in any supported image format, or an object name that can be resolved under an `AstroPhoto\Import` tree. Copy is the interactive default.
+`SourcePath` may be a folder, a light file in any supported image format, or an object name that can be resolved under the source `AstroPhoto\Import` tree. `ImportAll.ps1` uses `<source root>\Import` when `-ImportRoot` is omitted. Copy is the interactive default.
 
 When Copy mode reads from and writes to the same network share, the importer automatically batches files through `Robocopy /J /MT:4`. During the transfer it converts Robocopy's noisy multithreaded output into one stable file-progress banner containing the overall percentage, average throughput, and elapsed time, without printing duplicate batch-status lines. Files are first copied into a unique `.asitopix-import-*` staging directory under the destination setup and are then moved into their final night folders only after their sizes have been verified. The importer never overwrites an existing destination file. An incomplete non-empty staging directory is retained after a failure so its files can be recovered; local and mixed-location imports continue to use `Copy-Item`. Symlink mode is unchanged. `ImportSession.ps1` and `ImportAll.ps1` share this implementation.
 
@@ -266,13 +269,14 @@ When Copy mode reads from and writes to the same network share, the importer aut
 
 The destination `AstroPhoto\Calibration` directory must already exist.
 
-When `SourcePath` is omitted, `ImportCalibration.ps1` automatically discovers direct calibration folders matching `AstroPhoto\Import\<Setup>\bias(es)`, `dark(s)`, or `flat(s)`, prints the complete sorted list with each detected category, and asks once whether to import all of them. An explicit setup root or individual calibration category folder can still be supplied through `SourcePath`.
+When `SourcePath` is omitted, `ImportCalibration.ps1` automatically discovers direct calibration folders matching `<source root>\Import\<Setup>\bias(es)`, `dark(s)`, or `flat(s)`, prints the complete sorted list with each detected category, and asks once whether to import all of them. It writes to `<destination root>\Calibration`. An explicit setup root or individual calibration category folder can still be supplied through `SourcePath`.
 
-When the root is selected interactively, the prompt states both roles explicitly. Without `SourcePath`, the selected root supplies the read path `<root>\Import` and the write path `<root>\Calibration`. With an explicit `SourcePath`, only the calibration destination comes from the selected root.
+When automatic calibration discovery is used interactively, the script separately asks first for the source root (`<source>\Import`) and then for the destination root (`<destination>\Calibration`). With an explicit `SourcePath`, only the calibration destination root is needed.
 
 ```powershell
 .\ImportCalibration.ps1 `
-    -AstroPhotoRoot 'D:\AstroPhoto'
+    -SourceAstroPhotoRoot 'D:\AstroPhoto' `
+    -DestinationAstroPhotoRoot 'E:\AstroPhoto'
 
 .\ImportCalibration.ps1 `
     -SourcePath 'E:\ASIAIR\SQA55' `

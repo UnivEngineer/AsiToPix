@@ -72,6 +72,12 @@
 - [ ] После каждого изменения показывать `git diff`.
 ## Recent fixes
 
+- [x] `ImportCalibration.ps1`: prompt independently for the source root before automatic `Import` calibration discovery.
+
+- [x] `ImportSession.ps1`, `ImportAll.ps1`, and `ImportCalibration.ps1`: ask for the automatic source root before the destination root.
+
+- [x] `ImportCalibration.ps1`, `ImportSession.ps1`, and `ImportAll.ps1`: allow independent source and destination AstroPhoto roots, retaining `-AstroPhotoRoot` as the legacy destination parameter.
+
 - [x] Document the complete Totality workflow in `docs/IntegrateTotality.md`, including `AlignTotality.ps1`, `HDRTotality.ps1`, `NormalizeTotality.ps1`, their interactive PixInsight steps, outputs, rerun behavior, and command-line examples.
 - [x] Add `AlignTotality.ps1` and a manifest-driven PixInsight script to discover every `Total-<exposure>\Frames\integrated` frame, capture or reuse ChannelMatch RGB offsets, apply optional FastRotation transforms, persist offsets as JSON, and write operation-tagged frames under `HDR\Aligned`.
 - [x] Rename the Totality HDR composition entry point from `TotalityHDR.ps1` to `HDRTotality.ps1` for consistent stage naming.

@@ -4,6 +4,12 @@ param(
 
     [string]$AstroPhotoRoot = "",
 
+    [Alias("SourceRoot")]
+    [string]$SourceAstroPhotoRoot = "",
+
+    [Alias("DestinationRoot")]
+    [string]$DestinationAstroPhotoRoot = "",
+
     [string]$SeasonName = "",
 
     [ValidateSet("", "Copy", "Symlink")]
@@ -19,24 +25,65 @@ $importModule = Join-Path -Path $PSScriptRoot -ChildPath "src\AsiToPix.ImportSes
 
 Import-Module $environmentModule -Force
 Import-Module $importModule -Force
+Import-Module $pathsModule -Force
 
 Write-Host "--- ASIAir BATCH IMPORT ---" -ForegroundColor Cyan
 
-if ([string]::IsNullOrWhiteSpace($AstroPhotoRoot)) {
-    Import-Module $pathsModule -Force
-    $AstroPhotoRoot = Resolve-AstroPhotoRoot
+if (-not [string]::IsNullOrWhiteSpace($AstroPhotoRoot) -and
+    -not [string]::IsNullOrWhiteSpace($DestinationAstroPhotoRoot)) {
+    $legacyDestinationRoot = (Resolve-Path -LiteralPath $AstroPhotoRoot -ErrorAction Stop).ProviderPath
+    $namedDestinationRoot = (Resolve-Path -LiteralPath $DestinationAstroPhotoRoot -ErrorAction Stop).ProviderPath
+    if (-not $legacyDestinationRoot.Equals($namedDestinationRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Specify only one destination root: -AstroPhotoRoot (legacy) or -DestinationAstroPhotoRoot."
+    }
 }
-Write-AsiToPixCyrillicPathWarning -Path $AstroPhotoRoot -Context "AstroPhoto root"
+
+$sourceRootForImport = if ([string]::IsNullOrWhiteSpace($SourceAstroPhotoRoot)) {
+    if ([string]::IsNullOrWhiteSpace($ImportRoot)) {
+        Write-Host "[INFO] Select the light import source root (read from <selected root>\Import):" -ForegroundColor Cyan
+        Resolve-AstroPhotoRoot `
+            -Purpose "light import source" `
+            -SelectionPrompt "Select the light import source root" `
+            -AlwaysPrompt
+    } else {
+        ""
+    }
+} else {
+    if (-not (Test-Path -LiteralPath $SourceAstroPhotoRoot -PathType Container)) {
+        throw "AstroPhoto source root not found: $SourceAstroPhotoRoot"
+    }
+    (Resolve-Path -LiteralPath $SourceAstroPhotoRoot -ErrorAction Stop).ProviderPath
+}
+
+$destinationRootInput = if ([string]::IsNullOrWhiteSpace($DestinationAstroPhotoRoot)) {
+    $AstroPhotoRoot
+} else {
+    $DestinationAstroPhotoRoot
+}
+if ([string]::IsNullOrWhiteSpace($destinationRootInput)) {
+    $AstroPhotoRoot = Resolve-AstroPhotoRoot -Purpose "light archive destination"
+} else {
+    if (-not (Test-Path -LiteralPath $destinationRootInput -PathType Container)) {
+        throw "AstroPhoto destination root not found: $destinationRootInput"
+    }
+    $AstroPhotoRoot = (Resolve-Path -LiteralPath $destinationRootInput -ErrorAction Stop).ProviderPath
+}
+Write-AsiToPixCyrillicPathWarning -Path $AstroPhotoRoot -Context "AstroPhoto destination root"
 
 if (-not (Test-Path -LiteralPath $AstroPhotoRoot -PathType Container)) {
-    Write-Host "[!] AstroPhoto root not found: $AstroPhotoRoot" -ForegroundColor Red
+    Write-Host "[!] AstroPhoto destination root not found: $AstroPhotoRoot" -ForegroundColor Red
     exit 1
 }
 
+if ([string]::IsNullOrWhiteSpace($sourceRootForImport)) {
+    $sourceRootForImport = $AstroPhotoRoot
+}
+
 if ([string]::IsNullOrWhiteSpace($ImportRoot)) {
-    $ImportRoot = Join-Path -Path $AstroPhotoRoot -ChildPath "Import"
+    $ImportRoot = Join-Path -Path $sourceRootForImport -ChildPath "Import"
 }
 Write-AsiToPixCyrillicPathWarning -Path $ImportRoot -Context "Import root"
+Write-AsiToPixCyrillicPathWarning -Path $sourceRootForImport -Context "AstroPhoto source root"
 
 if (-not (Test-Path -LiteralPath $ImportRoot -PathType Container)) {
     Write-Host "[!] Import root not found: $ImportRoot" -ForegroundColor Red

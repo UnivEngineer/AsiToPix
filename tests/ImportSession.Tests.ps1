@@ -358,6 +358,24 @@ Describe "ImportSession parsing" {
         $entryScriptText | Should Match 'Resolve-AsiToPixImportSourcePath -SourcePath \$SourcePath'
     }
 
+    It "keeps source-root lookup separate from the destination archive root" {
+        $sessionScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "..\ImportSession.ps1"
+        $allScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "..\ImportAll.ps1"
+        $sessionScriptText = Get-Content -LiteralPath $sessionScriptPath -Raw
+        $allScriptText = Get-Content -LiteralPath $allScriptPath -Raw
+
+        $sessionScriptText | Should Match '\[Alias\("SourceRoot"\)\]\s*\[string\]\$SourceAstroPhotoRoot'
+        $sessionScriptText | Should Match '\[Alias\("DestinationRoot"\)\]\s*\[string\]\$DestinationAstroPhotoRoot'
+        $sessionScriptText | Should Match 'AstroPhotoRoot \$sourceRootForLookup'
+        $sessionScriptText | Should Match 'Import-AsiToPixSession[\s\S]*-AstroPhotoRoot \$AstroPhotoRoot'
+        $sessionScriptText | Should Match 'Select the light import source root \(search <selected root>\\Import\)'
+        $allScriptText | Should Match 'Join-Path -Path \$sourceRootForImport -ChildPath "Import"'
+        $allScriptText | Should Match 'Get-AsiToPixImportPlan[\s\S]*-AstroPhotoRoot \$AstroPhotoRoot'
+        $allScriptText | Should Match 'Select the light import source root \(read from <selected root>\\Import\)'
+        ($sessionScriptText.IndexOf('Select the light import source root') -lt $sessionScriptText.IndexOf('light archive destination')) | Should Be $true
+        ($allScriptText.IndexOf('Select the light import source root') -lt $allScriptText.IndexOf('light archive destination')) | Should Be $true
+    }
+
     It "lets the user choose between multiple matching import sessions" {
         $astroPhotoRoot = Join-Path -Path $TestDrive -ChildPath "multi-object-search-root\AstroPhoto"
         $firstFolder = Join-Path -Path $astroPhotoRoot -ChildPath "Import\APO120 @ 0.8x\Light\Dragons"

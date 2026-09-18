@@ -4,6 +4,12 @@ param(
 
     [string]$AstroPhotoRoot = "",
 
+    [Alias("SourceRoot")]
+    [string]$SourceAstroPhotoRoot = "",
+
+    [Alias("DestinationRoot")]
+    [string]$DestinationAstroPhotoRoot = "",
+
     [string]$CameraName = "",
 
     [string]$Gain = "",
@@ -26,31 +32,65 @@ $importModule = Join-Path -Path $PSScriptRoot -ChildPath "src\AsiToPix.ImportCal
 
 Import-Module $environmentModule -Force
 Import-Module $importModule -Force
+Import-Module $pathsModule -Force
 
 Write-Host "--- CALIBRATION FRAME IMPORT ---" -ForegroundColor Cyan
 
-if ([string]::IsNullOrWhiteSpace($AstroPhotoRoot)) {
-    Import-Module $pathsModule -Force
-    Write-Host "`n[INFO] Select the root used by this calibration import:" -ForegroundColor Cyan
-    if ([string]::IsNullOrWhiteSpace($SourcePath)) {
-        Write-Host "  Read from : <selected root>\Import" -ForegroundColor White
-    } else {
-        Write-Host "  Read from : $SourcePath" -ForegroundColor White
+if (-not [string]::IsNullOrWhiteSpace($AstroPhotoRoot) -and
+    -not [string]::IsNullOrWhiteSpace($DestinationAstroPhotoRoot)) {
+    $legacyDestinationRoot = (Resolve-Path -LiteralPath $AstroPhotoRoot -ErrorAction Stop).ProviderPath
+    $namedDestinationRoot = (Resolve-Path -LiteralPath $DestinationAstroPhotoRoot -ErrorAction Stop).ProviderPath
+    if (-not $legacyDestinationRoot.Equals($namedDestinationRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Specify only one destination root: -AstroPhotoRoot (legacy) or -DestinationAstroPhotoRoot."
     }
-    Write-Host "  Write to  : <selected root>\Calibration" -ForegroundColor White
-    $AstroPhotoRoot = Resolve-AstroPhotoRoot
 }
-Write-AsiToPixCyrillicPathWarning -Path $AstroPhotoRoot -Context "AstroPhoto root"
+
+$sourceRootForDiscovery = if ([string]::IsNullOrWhiteSpace($SourceAstroPhotoRoot)) {
+    if ([string]::IsNullOrWhiteSpace($SourcePath)) {
+        Write-Host "[INFO] Select the calibration source root (read from <selected root>\Import):" -ForegroundColor Cyan
+        Resolve-AstroPhotoRoot `
+            -Purpose "calibration source" `
+            -SelectionPrompt "Select the calibration source root" `
+            -AlwaysPrompt
+    } else {
+        ""
+    }
+} else {
+    if (-not (Test-Path -LiteralPath $SourceAstroPhotoRoot -PathType Container)) {
+        throw "AstroPhoto source root not found: $SourceAstroPhotoRoot"
+    }
+    (Resolve-Path -LiteralPath $SourceAstroPhotoRoot -ErrorAction Stop).ProviderPath
+}
+
+$destinationRootInput = if ([string]::IsNullOrWhiteSpace($DestinationAstroPhotoRoot)) {
+    $AstroPhotoRoot
+} else {
+    $DestinationAstroPhotoRoot
+}
+if ([string]::IsNullOrWhiteSpace($destinationRootInput)) {
+    Write-Host "`n[INFO] Select the calibration destination root:" -ForegroundColor Cyan
+    $AstroPhotoRoot = Resolve-AstroPhotoRoot -Purpose "calibration destination"
+} else {
+    if (-not (Test-Path -LiteralPath $destinationRootInput -PathType Container)) {
+        throw "AstroPhoto destination root not found: $destinationRootInput"
+    }
+    $AstroPhotoRoot = (Resolve-Path -LiteralPath $destinationRootInput -ErrorAction Stop).ProviderPath
+}
+Write-AsiToPixCyrillicPathWarning -Path $AstroPhotoRoot -Context "AstroPhoto destination root"
 
 if (-not (Test-Path -LiteralPath $AstroPhotoRoot -PathType Container)) {
-    Write-Host "[!] AstroPhoto root not found: $AstroPhotoRoot" -ForegroundColor Red
+    Write-Host "[!] AstroPhoto destination root not found: $AstroPhotoRoot" -ForegroundColor Red
     exit 1
+}
+
+if ([string]::IsNullOrWhiteSpace($sourceRootForDiscovery)) {
+    $sourceRootForDiscovery = $AstroPhotoRoot
 }
 
 $sourcePaths = @()
 $useDiscoveryConfirmation = $false
 if ([string]::IsNullOrWhiteSpace($SourcePath)) {
-    $importRoot = Join-Path -Path $AstroPhotoRoot -ChildPath "Import"
+    $importRoot = Join-Path -Path $sourceRootForDiscovery -ChildPath "Import"
     Write-Host "[INFO] Calibration source discovery (read): $importRoot" -ForegroundColor DarkGray
     $discoveredFolders = @(Find-AsiToPixCalibrationImportFolder -ImportRoot $importRoot)
     if ($discoveredFolders.Count -gt 0) {
@@ -73,6 +113,7 @@ if ([string]::IsNullOrWhiteSpace($SourcePath)) {
         $SourcePath = (Read-Host "Enter import root containing flat(s), dark(s), and bias(es) folders").Trim('"')
     }
 }
+Write-AsiToPixCyrillicPathWarning -Path $sourceRootForDiscovery -Context "AstroPhoto source root"
 if ($sourcePaths.Count -eq 0) {
     $sourcePaths = @($SourcePath)
 }
